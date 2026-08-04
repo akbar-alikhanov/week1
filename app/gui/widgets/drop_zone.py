@@ -155,8 +155,10 @@ class FileDropZone(ctk.CTkFrame):
             if self._select_directory and path.is_dir():
                 self.set_path(path)
                 return
-            if not self._select_directory and path.is_file() and (
-                not self._extensions or path.suffix.lower() in self._extensions
+            if (
+                not self._select_directory
+                and path.is_file()
+                and (not self._extensions or path.suffix.lower() in self._extensions)
             ):
                 self.set_path(path)
                 return

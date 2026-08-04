@@ -44,7 +44,7 @@ _LOGGER = logging.getLogger(__name__)
 NAV_ITEMS: tuple[NavItem, ...] = (
     NavItem("dashboard", "Подбор", "dashboard", "Ctrl+1"),
     NavItem("certificates", "Сертификаты", "certificate", "Ctrl+2"),
-    NavItem("aliases", "Соответствия", "alias", "Ctrl+3"),
+    NavItem("aliases", "Словарь товаров", "alias", "Ctrl+3"),
     NavItem("history", "История", "history", "Ctrl+4"),
     NavItem("logs", "Журнал", "log", "Ctrl+5"),
     NavItem("settings", "Настройки", "settings", "Ctrl+6"),

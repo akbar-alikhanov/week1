@@ -58,9 +58,7 @@ def main() -> int:
     offset = ((base_size - icon_size) // 2, (base_size - icon_size) // 2)
     padded.alpha_composite(icon_image, offset)
 
-    padded.save(
-        OUTPUT_PATH, format="ICO", sizes=[(size, size) for size in ICON_SIZES]
-    )
+    padded.save(OUTPUT_PATH, format="ICO", sizes=[(size, size) for size in ICON_SIZES])
     print(f"Значок сохранён: {OUTPUT_PATH} ({OUTPUT_PATH.stat().st_size} байт)")
     return 0
 

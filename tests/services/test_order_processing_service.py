@@ -22,7 +22,7 @@ from app.ai.vector_index import VectorIndex  # noqa: E402
 from app.config.settings import SettingsService  # noqa: E402
 from app.core.events import EventBus  # noqa: E402
 from app.database.connection import Database  # noqa: E402
-from app.models.matching import MatchStatus  # noqa: E402
+from app.models.matching import MatchResult, MatchStatus  # noqa: E402
 from app.parsers.excel_order_parser import ExcelOrderParser  # noqa: E402
 from app.repositories.alias_repository import AliasRepository  # noqa: E402
 from app.repositories.certificate_repository import CertificateRepository  # noqa: E402
@@ -274,3 +274,72 @@ class TestFullScenario:
         assert product is not None
         assert product.seen_count == 1
         assert product.matched_count == 1
+
+
+class TestSelfLearningConsent:
+    """Проверки: отказ пользователя запоминать выбор должен соблюдаться.
+
+    Регрессия: окно неоднозначного выбора помечает результат
+    (``note`` + ``alias_applied=True``), когда пользователь снимает галочку
+    «Запомнить выбор», но оркестратор раньше не проверял этот признак и всё
+    равно создавал псевдоним — отказ пользователя тихо игнорировался.
+    """
+
+    def _add_rival(self, tmp_path: Path, certificate_repository: CertificateRepository) -> None:
+        """Добавляет второй вариант товара, чтобы гарантировать неоднозначность."""
+        from tests.conftest import make_certificate
+
+        rival_path = tmp_path / "certs" / "180099.pdf"
+        rival_path.write_bytes(b"%PDF-1.4 fake")
+        certificate_repository.add(
+            make_certificate(
+                "Лечебные травы, сироп 200 мл",
+                str(rival_path),
+                volume_value=200.0,
+                volume_unit="ml",
+                expiry_date=_FUTURE,
+            )
+        )
+
+    def test_declining_to_remember_skips_alias_creation(
+        self,
+        order_service: OrderProcessingService,
+        tmp_path: Path,
+        certificate_repository: CertificateRepository,
+        alias_repository: AliasRepository,
+    ) -> None:
+        """Признак отказа, выставленный резолвером, должен блокировать самообучение."""
+        self._add_rival(tmp_path, certificate_repository)
+        order_path = tmp_path / "Заказ.xlsx"
+        _build_order_file(order_path, [("Лечебные травы, сироп", 5)])
+
+        def _resolver(result: MatchResult, remaining: int) -> int:
+            result.note = "Выбор не сохранён в псевдонимы"
+            result.alias_applied = True
+            return 0
+
+        order_service.process(
+            ProcessingRequest(order_path=order_path, resolve_ambiguities=_resolver)
+        )
+
+        assert alias_repository.count() == 0
+
+    def test_default_consent_creates_alias(
+        self,
+        order_service: OrderProcessingService,
+        tmp_path: Path,
+        certificate_repository: CertificateRepository,
+        alias_repository: AliasRepository,
+    ) -> None:
+        """Без отказа ручной выбор в окне неоднозначности запоминается как обычно."""
+        self._add_rival(tmp_path, certificate_repository)
+        order_path = tmp_path / "Заказ.xlsx"
+        _build_order_file(order_path, [("Лечебные травы, сироп", 5)])
+
+        order_service.process(
+            ProcessingRequest(
+                order_path=order_path, resolve_ambiguities=lambda result, remaining: 0
+            )
+        )
+
+        assert alias_repository.count() == 1

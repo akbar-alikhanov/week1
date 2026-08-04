@@ -196,9 +196,7 @@ class Sidebar(ctk.CTkFrame):
         navigation.pack(fill="both", expand=True, padx=Spacing.SM)
 
         for item in items:
-            button = NavButton(
-                navigation, theme, item=item, command=self._make_navigate(item.key)
-            )
+            button = NavButton(navigation, theme, item=item, command=self._make_navigate(item.key))
             button.pack(fill="x", pady=2)
             self._buttons[item.key] = button
 

@@ -90,9 +90,7 @@ def _rect(
     if fill:
         draw.rounded_rectangle(scaled, radius=corner, fill=color)
     else:
-        draw.rounded_rectangle(
-            scaled, radius=corner, outline=color, width=max(1, round(width))
-        )
+        draw.rounded_rectangle(scaled, radius=corner, outline=color, width=max(1, round(width)))
 
 
 def _arc(
@@ -318,6 +316,19 @@ def _icon_plus(draw: Any, size: float, width: float, color: Any) -> None:
     _stroke(draw, [(0.20, 0.50), (0.80, 0.50)], size, width, color)
 
 
+def _icon_edit(draw: Any, size: float, width: float, color: Any) -> None:
+    """Редактирование: карандаш."""
+    _stroke(draw, [(0.18, 0.82), (0.28, 0.82), (0.72, 0.38)], size, width, color)
+    _polygon(draw, [(0.72, 0.38), (0.82, 0.24), (0.90, 0.32), (0.80, 0.46)], size, color)
+    _stroke(draw, [(0.16, 0.84), (0.22, 0.84)], size, width * 0.9, color)
+
+
+def _icon_undo(draw: Any, size: float, width: float, color: Any) -> None:
+    """Отмена последнего действия: стрелка против часовой стрелки."""
+    _arc(draw, (0.5, 0.5), 0.32, 200, 340, size, width, color)
+    _polygon(draw, [(0.24, 0.24), (0.16, 0.42), (0.36, 0.40)], size, color)
+
+
 def _icon_database(draw: Any, size: float, width: float, color: Any) -> None:
     """База данных."""
     _arc(draw, (0.50, 0.24), 0.30, 0, 360, size, width, color)
@@ -478,6 +489,8 @@ ICONS: Final[dict[str, IconDrawer]] = {
     "external": _icon_external,
     "trash": _icon_trash,
     "plus": _icon_plus,
+    "edit": _icon_edit,
+    "undo": _icon_undo,
     "database": _icon_database,
     "chart": _icon_chart,
     "info": _icon_info,
@@ -510,7 +523,7 @@ class IconFactory:
         image = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
         if drawer is None:
             _LOGGER.debug("Иконка «%s» не найдена", name)
-            return image.resize((size, size), Image.LANCZOS)
+            return image.resize((size, size), Image.Resampling.LANCZOS)
 
         draw = ImageDraw.Draw(image)
         stroke_width = max(1.0, canvas_size * _STROKE_RATIO)
@@ -518,7 +531,7 @@ class IconFactory:
             drawer(draw, float(canvas_size), stroke_width, color)
         except Exception:
             _LOGGER.debug("Ошибка отрисовки иконки «%s»", name, exc_info=True)
-        return image.resize((size, size), Image.LANCZOS)
+        return image.resize((size, size), Image.Resampling.LANCZOS)
 
     def render_image(self, name: str, size: int, color: str) -> Any:
         """Отрисовывает иконку как изображение Pillow.

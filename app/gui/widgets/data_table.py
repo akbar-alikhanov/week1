@@ -70,6 +70,7 @@ class DataTable(ctk.CTkFrame):
         on_activate: Callable[[str], None] | None = None,
         context_actions: Sequence[tuple[str, Callable[[str], None]]] = (),
         height: int = 14,
+        selectmode: Literal["browse", "extended"] = "browse",
         **kwargs: Any,
     ) -> None:
         """Создаёт таблицу.
@@ -82,6 +83,9 @@ class DataTable(ctk.CTkFrame):
             on_activate: Обработчик двойного щелчка.
             context_actions: Пункты контекстного меню.
             height: Высота в строках.
+            selectmode: ``"browse"`` — не более одной выбранной строки (по
+                умолчанию); ``"extended"`` — выбор нескольких строк (Shift/Ctrl
+                + щелчок) для массовых операций.
             **kwargs: Дополнительные параметры ``CTkFrame``.
         """
         from tkinter import ttk
@@ -114,7 +118,7 @@ class DataTable(ctk.CTkFrame):
             show="headings",
             height=height,
             style="CertMatcher.Treeview",
-            selectmode="browse",
+            selectmode=selectmode,
         )
 
         for column in self._columns:
@@ -158,6 +162,11 @@ class DataTable(ctk.CTkFrame):
         """Идентификатор выбранной строки (пустая строка, если выбора нет)."""
         selection = self.tree.selection()
         return str(selection[0]) if selection else ""
+
+    @property
+    def selected_ids(self) -> list[str]:
+        """Идентификаторы всех выбранных строк (для ``selectmode="extended"``)."""
+        return [str(item) for item in self.tree.selection()]
 
     @property
     def row_count(self) -> int:

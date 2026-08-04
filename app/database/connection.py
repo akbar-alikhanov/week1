@@ -115,6 +115,7 @@ class Database:
             except sqlite3.Error as error:  # pragma: no cover — зависит от платформы
                 _LOGGER.debug("PRAGMA не применён (%s): %s", pragma, error)
         connection.create_function("REGEXP", 2, _regexp, deterministic=True)
+        connection.create_function("LOWER", 1, _lower_unicode, deterministic=True)
         return connection
 
     def initialize(self) -> int:
@@ -381,3 +382,21 @@ def _regexp(pattern: str, value: str | None) -> bool:
         return re.search(pattern, value, re.IGNORECASE) is not None
     except re.error:  # pragma: no cover — некорректный шаблон от пользователя
         return False
+
+
+def _lower_unicode(value: str | None) -> str | None:
+    """Реализация ``LOWER()``, корректно работающая с кириллицей.
+
+    Встроенная функция ``lower()`` в SQLite приводит к нижнему регистру
+    только ASCII-символы — «Товар» остаётся «Товар». Поскольку весь текст в
+    приложении русскоязычный, а поиск обязан быть нечувствителен к регистру,
+    функция регистрируется под тем же именем и подменяет встроенную во всех
+    запросах, использующих ``lower(...)`` для сравнения без учёта регистра.
+
+    Args:
+        value: Проверяемое значение.
+
+    Returns:
+        Значение в нижнем регистре либо ``None``.
+    """
+    return value.lower() if value is not None else None

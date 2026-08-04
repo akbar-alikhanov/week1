@@ -232,6 +232,38 @@ END;
 """
 
 
+#: Модуль управления словарём соответствий (версия 2): бренд и объём как
+#: самостоятельные редактируемые поля алиаса (а не только производные от
+#: связанного сертификата), раздельные отметки «изменён»/«применён» и
+#: журнал аудита — основа отмены последнего действия и истории изменений.
+_SCHEMA_V2: Final[str] = """
+ALTER TABLE aliases ADD COLUMN brand         TEXT NOT NULL DEFAULT '';
+ALTER TABLE aliases ADD COLUMN volume_value  REAL;
+ALTER TABLE aliases ADD COLUMN volume_unit   TEXT NOT NULL DEFAULT '';
+ALTER TABLE aliases ADD COLUMN last_used_at  TEXT;
+ALTER TABLE aliases ADD COLUMN created_by    TEXT NOT NULL DEFAULT '';
+
+CREATE INDEX IF NOT EXISTS idx_aliases_brand ON aliases (brand);
+
+-- Журнал изменений словаря: основа undo и раздела «Журнал изменений».
+-- alias_id намеренно без FK — запись о удалении должна пережить сам алиас.
+CREATE TABLE IF NOT EXISTS alias_audit (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    alias_id    INTEGER NOT NULL,
+    action      TEXT    NOT NULL,
+    source_text TEXT    NOT NULL DEFAULT '',
+    before_json TEXT,
+    after_json  TEXT,
+    actor       TEXT    NOT NULL DEFAULT '',
+    at          TEXT    NOT NULL,
+    undone      INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_alias_audit_alias ON alias_audit (alias_id);
+CREATE INDEX IF NOT EXISTS idx_alias_audit_at    ON alias_audit (at DESC);
+"""
+
+
 def _migration_001_initial(connection: sqlite3.Connection) -> None:
     """Создаёт начальную схему базы данных.
 
@@ -240,6 +272,15 @@ def _migration_001_initial(connection: sqlite3.Connection) -> None:
     """
     connection.executescript(_SCHEMA_V1)
     _try_create_fts(connection)
+
+
+def _migration_002_alias_manager(connection: sqlite3.Connection) -> None:
+    """Расширяет таблицу псевдонимов для модуля управления словарём.
+
+    Args:
+        connection: Открытое соединение SQLite.
+    """
+    connection.executescript(_SCHEMA_V2)
 
 
 def _try_create_fts(connection: sqlite3.Connection) -> None:
@@ -260,6 +301,7 @@ def _try_create_fts(connection: sqlite3.Connection) -> None:
 #: Реестр миграций: версия → функция применения.
 MIGRATIONS: Final[dict[int, Callable[[sqlite3.Connection], None]]] = {
     1: _migration_001_initial,
+    2: _migration_002_alias_manager,
 }
 
 #: Целевая версия схемы.

@@ -277,7 +277,15 @@ class OrderProcessingService:
                 result.note = "Пропущено пользователем"
                 continue
             result.select(choice, manual=True)
-            if request.learn_from_choices and self._aliases is not None:
+            # ``alias_applied`` уже могло быть выставлено вызывающей стороной
+            # (окно выбора) как сигнал «пользователь снял галочку "Запомнить
+            # выбор"» — в этом случае самообучение нужно пропустить, иначе
+            # отказ запоминать соответствие тихо игнорируется.
+            if (
+                request.learn_from_choices
+                and self._aliases is not None
+                and not result.alias_applied
+            ):
                 try:
                     self._aliases.learn_from_result(result, note="Выбор в окне неоднозначности")
                 except Exception:
