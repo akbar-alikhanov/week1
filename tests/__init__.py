@@ -1,0 +1,1 @@
+"""Тесты приложения BALTON CertMatcher."""

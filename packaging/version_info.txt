@@ -1,0 +1,38 @@
+# UTF-8
+#
+# Метаданные версии, встраиваемые в EXE (вкладка «Подробности» в свойствах
+# файла Проводника Windows). Формат — сериализованная структура
+# PyInstaller.utils.win32.versioninfo.VSVersionInfo; см.
+# https://pyinstaller.org/en/stable/spec-files.html#capturing-version-data
+VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers=(1, 0, 0, 0),
+    prodvers=(1, 0, 0, 0),
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0),
+  ),
+  kids=[
+    StringFileInfo(
+      [
+        StringTable(
+          '041904B0',
+          [
+            StringStruct('CompanyName', 'BALTON TRADING ASIA'),
+            StringStruct('FileDescription', 'BALTON CertMatcher — подбор сертификатов соответствия'),
+            StringStruct('FileVersion', '1.0.0.0'),
+            StringStruct('InternalName', 'BaltonCertMatcher'),
+            StringStruct('LegalCopyright', '© BALTON TRADING ASIA'),
+            StringStruct('OriginalFilename', 'BaltonCertMatcher.exe'),
+            StringStruct('ProductName', 'BALTON CertMatcher'),
+            StringStruct('ProductVersion', '1.0.0.0'),
+          ],
+        )
+      ]
+    ),
+    VarFileInfo([VarStruct('Translation', [1049, 1200])]),
+  ],
+)
