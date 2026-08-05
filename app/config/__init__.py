@@ -2,8 +2,8 @@
 
 from app.config.settings import (
     AppSettings,
+    CertificatesSettings,
     ExportSettings,
-    IndexingSettings,
     MaintenanceSettings,
     MatchingSettings,
     SettingsService,
@@ -12,8 +12,8 @@ from app.config.settings import (
 
 __all__ = [
     "AppSettings",
+    "CertificatesSettings",
     "ExportSettings",
-    "IndexingSettings",
     "MaintenanceSettings",
     "MatchingSettings",
     "SettingsService",

@@ -15,9 +15,9 @@ from app.models.order import OrderRow
 from tests.conftest import make_certificate
 
 
-def _candidate(name: str, path: str, total: float = 0.9) -> MatchCandidate:
+def _candidate(name: str, total: float = 0.9) -> MatchCandidate:
     """Создаёт кандидата для тестов моделей."""
-    certificate = make_certificate(name, path, expiry_date=dt.date(2029, 1, 1))
+    certificate = make_certificate(name, expiry_date=dt.date(2029, 1, 1))
     score = ScoreBreakdown(name=total, volume=1.0, expiry=1.0, total=total)
     return MatchCandidate(certificate=certificate, score=score, source=MatchSource.LEXICAL)
 
@@ -35,7 +35,7 @@ class TestMatchResult:
 
     def test_select_sets_selected_candidate(self) -> None:
         """Выбор кандидата делает его доступным через selected/certificate."""
-        candidate = _candidate("Товар", "/c/1.pdf")
+        candidate = _candidate("Товар")
         result = MatchResult(
             row=OrderRow(row_number=1, product_name="Товар"),
             status=MatchStatus.AMBIGUOUS,
@@ -47,7 +47,7 @@ class TestMatchResult:
 
     def test_select_manual_changes_status(self) -> None:
         """Ручной выбор переводит статус в MANUAL."""
-        candidate = _candidate("Товар", "/c/1.pdf")
+        candidate = _candidate("Товар")
         result = MatchResult(
             row=OrderRow(row_number=1, product_name="Товар"),
             status=MatchStatus.AMBIGUOUS,
@@ -68,8 +68,8 @@ class TestMatchResult:
 
     def test_best_returns_first_candidate_regardless_of_selection(self) -> None:
         """best всегда указывает на первого кандидата в списке."""
-        first = _candidate("A", "/c/1.pdf", total=0.9)
-        second = _candidate("B", "/c/2.pdf", total=0.7)
+        first = _candidate("A", total=0.9)
+        second = _candidate("B", total=0.7)
         result = MatchResult(
             row=OrderRow(row_number=1, product_name="Товар"),
             status=MatchStatus.AMBIGUOUS,
@@ -79,7 +79,7 @@ class TestMatchResult:
 
     def test_score_falls_back_to_best_without_selection(self) -> None:
         """До явного выбора score берётся у лучшего кандидата."""
-        candidate = _candidate("Товар", "/c/1.pdf", total=0.77)
+        candidate = _candidate("Товар", total=0.77)
         result = MatchResult(
             row=OrderRow(row_number=1, product_name="Товар"),
             status=MatchStatus.AMBIGUOUS,
@@ -89,7 +89,7 @@ class TestMatchResult:
 
     def test_to_report_dict_contains_expected_keys(self) -> None:
         """Словарь отчёта содержит все ключевые поля для Excel/CSV."""
-        candidate = _candidate("Товар", "/c/1.pdf")
+        candidate = _candidate("Товар")
         result = MatchResult(
             row=OrderRow(row_number=5, product_name="Товар"),
             status=MatchStatus.MATCHED,

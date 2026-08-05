@@ -1,8 +1,10 @@
 """Генератор демонстрационного набора данных.
 
-Создаёт реалистичную папку сертификатов (PDF) и файл заказа (Excel), чтобы
-приложение можно было оценить сразу после установки, не имея под рукой
-рабочих документов.
+Создаёт Excel-базу сертификатов (единственный источник данных о сертификатах),
+папку с номинальными PDF-файлами (для демонстрации копирования по номеру
+сертификата — их содержимое нигде не читается и не разбирается) и файл заказа
+(Excel), чтобы приложение можно было оценить сразу после установки, не имея
+под рукой рабочих документов.
 
 Запуск::
 
@@ -43,41 +45,7 @@ CATALOG: list[tuple[str, list[str], str]] = [
     ("Пластырь бактерицидный", ["20 шт", "100 шт"], "MediPlast"),
 ]
 
-MANUFACTURERS = [
-    'ООО "ФИТО-ФАРМ", Республика Узбекистан, г. Ташкент',
-    'СП ООО "MEDIPHARM ASIA", Республика Узбекистан, г. Самарканд',
-    'АО "БИОСИНТЕЗ", Российская Федерация, г. Пенза',
-    "Zhejiang Health Products Co. Ltd, Китайская Народная Республика",
-]
-
-ISSUERS = [
-    'Орган по сертификации продукции "UZTEST" ООО',
-    'Орган по сертификации "SIFAT NAZORAT" при Узстандарт',
-    'Испытательный центр "MEDCERT" ООО',
-]
-
-CERTIFICATE_TEMPLATE = """РЕСПУБЛИКА УЗБЕКИСТАН
-{issuer}
-
-СЕРТИФИКАТ СООТВЕТСТВИЯ
-№ {number}
-
-Продукция: {product}
-Торговая марка: «{brand}»
-Изготовитель: {manufacturer}
-Заявитель: ООО "BALTON TRADING ASIA", г. Ташкент, ул. Амира Темура, 15
-Страна происхождения: {country}
-Код ТН ВЭД: {tnved}
-
-Соответствует требованиям нормативных документов:
-O'z DSt {standard}
-
-Срок действия: с {issued} по {expiry}
-Дата регистрации: {issued}
-Схема сертификации: 3а
-
-Руководитель органа по сертификации _______________ {official}
-"""
+CERTIFICATE_TEMPLATE = "СЕРТИФИКАТ СООТВЕТСТВИЯ\n№ {number}\n\n{product}"
 
 
 def _find_cyrillic_font() -> str | None:
@@ -99,82 +67,133 @@ def _find_cyrillic_font() -> str | None:
     return None
 
 
-def generate_certificates(
-    destination: Path, count: int, seed: int = 20240401
+def generate_certificates_database(
+    output: Path, count: int, seed: int = 20240401
 ) -> list[dict[str, str]]:
-    """Создаёт PDF-сертификаты в указанной папке.
+    """Строит записи базы сертификатов (без обращения к диску).
 
     Args:
-        destination: Каталог для файлов.
-        count: Количество генерируемых сертификатов.
+        output: Каталог результата (не используется для самих записей —
+            нужен только для согласованности с остальными функциями).
+        count: Количество генерируемых позиций.
         seed: Зерно генератора случайных чисел (для воспроизводимости).
 
     Returns:
-        Список описаний созданных сертификатов.
+        Список описаний созданных позиций: ``file``/``number``/``product``/
+        ``expiry`` — те же ключи, что и раньше, чтобы существующий сценарий
+        генерации заказа не менялся.
     """
-    import fitz
-
+    _ = output
     rng = random.Random(seed)
-    destination.mkdir(parents=True, exist_ok=True)
-    font_file = _find_cyrillic_font()
-    created: list[dict[str, str]] = []
     number_base = 180000
 
     combinations = [(name, volume, brand) for name, volumes, brand in CATALOG for volume in volumes]
     rng.shuffle(combinations)
 
+    created: list[dict[str, str]] = []
     for index in range(count):
-        name, volume, brand = combinations[index % len(combinations)]
+        name, volume, _brand = combinations[index % len(combinations)]
         issued = date(2023, 1, 1) + timedelta(days=rng.randint(0, 900))
         expiry = issued + timedelta(days=rng.choice([365 * 3, 365 * 5, 365 * 5 + 30]))
         number = f"UZ.AMT.01.{number_base + index * 7}"
-        payload = CERTIFICATE_TEMPLATE.format(
-            issuer=rng.choice(ISSUERS),
-            number=number,
-            product=f"{name} {volume}",
-            brand=brand,
-            manufacturer=rng.choice(MANUFACTURERS),
-            country=rng.choice(["Узбекистан", "Россия", "Китай", "Турция"]),
-            tnved=f"{rng.randint(2000, 3900)} {rng.randint(10, 99)} {rng.randint(100, 999)} 0",
-            standard=f"{rng.randint(1000, 3200)}:{rng.randint(2015, 2023)}",
-            issued=issued.strftime("%d.%m.%Y"),
-            expiry=expiry.strftime("%d.%m.%Y"),
-            official=rng.choice(["Иванов И.И.", "Каримов А.Б.", "Юсупов Ш.Т."]),
-        )
-
-        file_path = destination / f"{number_base + index * 7}.pdf"
-        document = fitz.open()
-        page = document.new_page()
-        rect = fitz.Rect(45, 45, 550, 800)
-        if font_file:
-            page.insert_textbox(rect, payload, fontsize=10, fontfile=font_file, fontname="F0")
-        else:  # pragma: no cover — резервный вариант без кириллицы
-            page.insert_textbox(rect, payload, fontsize=10, fontname="helv")
-        document.save(file_path)
-        document.close()
-
         created.append(
             {
-                "file": file_path.name,
+                "file": f"{number}.pdf",
                 "number": number,
                 "product": f"{name} {volume}",
                 "expiry": expiry.strftime("%d.%m.%Y"),
             }
         )
-
     return created
+
+
+def write_certificates_excel(destination: Path, certificates: list[dict[str, str]]) -> Path:
+    """Записывает базу сертификатов в Excel по фиксированной структуре.
+
+    Колонки: A — порядковый номер, B — наименование товара (русское),
+    C — срок годности, D — номер сертификата. Это единственный источник
+    данных о сертификатах — SQLite при запуске приложения лишь индексирует
+    этот файл.
+
+    Args:
+        destination: Путь создаваемого файла.
+        certificates: Описания позиций (см. :func:`generate_certificates_database`).
+
+    Returns:
+        Путь созданного файла.
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "База сертификатов"
+    headers = ["№", "Наименование товара", "Срок годности", "Номер сертификата"]
+    for column, title in enumerate(headers, start=1):
+        cell = sheet.cell(row=1, column=column, value=title)
+        cell.font = Font(bold=True)
+
+    for index, record in enumerate(certificates, start=1):
+        sheet.cell(row=index + 1, column=1, value=index)
+        sheet.cell(row=index + 1, column=2, value=record["product"])
+        sheet.cell(row=index + 1, column=3, value=record["expiry"])
+        sheet.cell(row=index + 1, column=4, value=record["number"])
+
+    widths = {"A": 6, "B": 42, "C": 16, "D": 22}
+    for column, width in widths.items():
+        sheet.column_dimensions[column].width = width
+    sheet.freeze_panes = "A2"
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    workbook.save(destination)
+    return destination
+
+
+def write_certificate_pdfs(destination: Path, certificates: list[dict[str, str]]) -> Path:
+    """Создаёт номинальные PDF-файлы, названные по номеру сертификата.
+
+    Содержимое PDF нигде не читается и не разбирается — программа находит
+    файл только по номеру в имени и копирует его как есть. Текст внутри
+    добавлен исключительно для визуального просмотра во встроенном
+    просмотрщике, а не для последующего разбора.
+
+    Args:
+        destination: Каталог для файлов.
+        certificates: Описания позиций (см. :func:`generate_certificates_database`).
+
+    Returns:
+        Путь к созданной папке.
+    """
+    import fitz
+
+    destination.mkdir(parents=True, exist_ok=True)
+    font_file = _find_cyrillic_font()
+
+    for record in certificates:
+        payload = CERTIFICATE_TEMPLATE.format(number=record["number"], product=record["product"])
+        document = fitz.open()
+        page = document.new_page()
+        rect = fitz.Rect(45, 45, 550, 300)
+        if font_file:
+            page.insert_textbox(rect, payload, fontsize=14, fontfile=font_file, fontname="F0")
+        else:  # pragma: no cover — резервный вариант без кириллицы
+            page.insert_textbox(rect, payload, fontsize=14, fontname="helv")
+        document.save(destination / record["file"])
+        document.close()
+
+    return destination
 
 
 def generate_order(destination: Path, certificates: list[dict[str, str]], rows: int = 40) -> Path:
     """Создаёт файл заказа в формате Excel.
 
     В заказ намеренно попадают позиции трёх типов: точно совпадающие с
-    сертификатами, записанные иначе (сокращения, латиница) и отсутствующие
-    в справочнике — чтобы продемонстрировать все ветви алгоритма.
+    базой сертификатов, записанные иначе (сокращения, латиница) и
+    отсутствующие в базе — чтобы продемонстрировать все ветви алгоритма.
 
     Args:
         destination: Путь создаваемого файла.
-        certificates: Описания созданных сертификатов.
+        certificates: Описания позиций базы сертификатов.
         rows: Количество строк заказа.
 
     Returns:
@@ -256,16 +275,21 @@ def main() -> int:
     parser.add_argument("--rows", type=int, default=40, help="Количество строк заказа")
     arguments = parser.parse_args()
 
-    certificates_dir = arguments.output / "Сертификаты"
+    database_file = arguments.output / "База_сертификатов.xlsx"
+    pdf_dir = arguments.output / "PDF сертификатов"
     order_file = arguments.output / "Заказ_демо.xlsx"
 
-    print(f"Генерация {arguments.certificates} сертификатов в {certificates_dir} …")
-    created = generate_certificates(certificates_dir, arguments.certificates)
+    print(f"Генерация {arguments.certificates} позиций базы сертификатов…")
+    certificates = generate_certificates_database(arguments.output, arguments.certificates)
+    write_certificates_excel(database_file, certificates)
+    print(f"Генерация номинальных PDF-файлов в {pdf_dir} …")
+    write_certificate_pdfs(pdf_dir, certificates)
     print(f"Генерация заказа ({arguments.rows} строк) в {order_file} …")
-    generate_order(order_file, created, arguments.rows)
+    generate_order(order_file, certificates, arguments.rows)
     print("Готово.")
-    print(f"  Папка сертификатов: {certificates_dir.resolve()}")
-    print(f"  Файл заказа:        {order_file.resolve()}")
+    print(f"  База сертификатов (Excel): {database_file.resolve()}")
+    print(f"  Папка PDF сертификатов:    {pdf_dir.resolve()}")
+    print(f"  Файл заказа:               {order_file.resolve()}")
     return 0
 
 

@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any
 
 import customtkinter as ctk
@@ -45,7 +44,7 @@ class CandidateRow(ctk.CTkFrame):
         candidate: MatchCandidate,
         index: int,
         on_choose: Callable[[int], None],
-        on_preview: Callable[[Path], None] | None = None,
+        on_preview: Callable[[str], None] | None = None,
         animator: Animator | None = None,
         recommended: bool = False,
         **kwargs: Any,
@@ -155,10 +154,7 @@ class CandidateRow(ctk.CTkFrame):
 
         ctk.CTkLabel(
             details,
-            text=(
-                f"{candidate.score.explain()}  ·  {candidate.source.label}  ·  "
-                f"{certificate.pdf_name}"
-            ),
+            text=f"{candidate.score.explain()}  ·  {candidate.source.label}",
             font=theme.font(FontRole.CAPTION),
             text_color=theme.color("text_muted"),
             anchor="w",
@@ -179,13 +175,13 @@ class CandidateRow(ctk.CTkFrame):
             width=104,
         ).pack()
 
-        if on_preview is not None and certificate.path.exists():
+        if on_preview is not None and certificate.certificate_number:
             ghost_button(
                 actions,
                 theme,
                 text="Просмотр",
                 icon="eye",
-                command=lambda: on_preview(certificate.path),
+                command=lambda: on_preview(certificate.certificate_number),
                 height=28,
             ).pack(pady=(Spacing.XS, 0))
 
@@ -218,7 +214,7 @@ class AmbiguityDialog(ModalDialog):
         *,
         result: MatchResult,
         animator: Animator | None = None,
-        on_preview: Callable[[Path], None] | None = None,
+        on_preview: Callable[[str], None] | None = None,
         on_search: Callable[[str], list[MatchCandidate]] | None = None,
         remaining: int = 0,
     ) -> None:
@@ -229,7 +225,7 @@ class AmbiguityDialog(ModalDialog):
             theme: Активная тема оформления.
             result: Результат подбора с несколькими кандидатами.
             animator: Менеджер анимаций.
-            on_preview: Обработчик просмотра PDF.
+            on_preview: Обработчик просмотра PDF (принимает номер сертификата).
             on_search: Функция поиска по произвольному запросу.
             remaining: Сколько позиций ещё предстоит разобрать.
         """

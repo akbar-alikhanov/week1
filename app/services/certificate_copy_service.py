@@ -1,9 +1,13 @@
 """Копирование подобранных PDF-сертификатов в папку результата.
 
-Ключевое требование: если один сертификат подходит нескольким товарам, файл
-копируется один раз. Дедупликация выполняется по исходному пути, а конфликты
-имён (одинаковые имена файлов из разных подпапок) разрешаются добавлением
-суффикса — иначе один сертификат молча затёр бы другой.
+PDF не читаются и не анализируются — они только копируются. Связь между
+строкой базы сертификатов и файлом на диске устанавливается исключительно
+по имени файла: он находится по номеру сертификата
+(:mod:`app.services.certificate_file_locator`), затем просто копируется.
+Если один и тот же номер сертификата нужен нескольким товарам заказа, файл
+копируется один раз — дедупликация выполняется по номеру, а конфликты имён
+(одинаковые имена файлов из разных подпапок) разрешаются добавлением
+суффикса, иначе один сертификат молча затёр бы другой.
 """
 
 from __future__ import annotations
@@ -17,6 +21,7 @@ from app.core.constants import CERTIFICATES_OUTPUT_DIRNAME
 from app.core.events import ProgressReporter
 from app.core.exceptions import ExportError
 from app.models.matching import MatchResult
+from app.services.certificate_file_locator import CertificateFileIndex
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -29,9 +34,9 @@ class CopyReport:
         destination: Каталог, в который выполнено копирование.
         copied: Количество скопированных файлов.
         reused: Сколько раз файл уже был скопирован ранее (дедупликация).
-        missing: Файлы, отсутствующие на диске.
+        missing: Номера сертификатов, для которых PDF не найден в папке.
         failed: Пары «файл → причина ошибки».
-        mapping: Соответствие «исходный путь → путь в папке результата».
+        mapping: Соответствие «номер сертификата → путь в папке результата».
     """
 
     destination: Path
@@ -47,22 +52,32 @@ class CopyReport:
         if self.reused:
             parts.append(f"повторных ссылок {self.reused}")
         if self.missing:
-            parts.append(f"отсутствуют {len(self.missing)}")
+            parts.append(f"файл не найден {len(self.missing)}")
         if self.failed:
             parts.append(f"ошибок {len(self.failed)}")
         return "Сертификаты: " + ", ".join(parts)
 
 
 class CertificateCopyService:
-    """Копирует PDF-файлы подобранных сертификатов."""
+    """Находит и копирует PDF-файлы подобранных сертификатов по номеру."""
 
-    def __init__(self, *, dirname: str = CERTIFICATES_OUTPUT_DIRNAME) -> None:
+    def __init__(
+        self,
+        *,
+        source_dir: Path | None,
+        dirname: str = CERTIFICATES_OUTPUT_DIRNAME,
+        recursive: bool = True,
+    ) -> None:
         """Создаёт сервис копирования.
 
         Args:
+            source_dir: Папка, в которой ищутся PDF-файлы сертификатов.
             dirname: Имя создаваемой папки с сертификатами.
+            recursive: Искать ли PDF во вложенных папках ``source_dir``.
         """
+        self._source_dir = source_dir
         self._dirname = dirname or CERTIFICATES_OUTPUT_DIRNAME
+        self._recursive = recursive
 
     def target_directory(self, output_file: Path) -> Path:
         """Определяет папку для копий сертификатов.
@@ -98,21 +113,34 @@ class CertificateCopyService:
         destination = self.target_directory(output_file)
         report = CopyReport(destination=destination)
 
-        sources: list[Path] = []
+        numbers: list[str] = []
         seen: set[str] = set()
         for result in results:
             certificate = result.certificate
-            if certificate is None:
+            if certificate is None or not certificate.certificate_number:
                 continue
-            key = certificate.pdf_path
-            if key in seen:
+            number = certificate.certificate_number
+            if number in seen:
                 report.reused += 1
                 continue
-            seen.add(key)
-            sources.append(certificate.path)
+            seen.add(number)
+            numbers.append(number)
+
+        if not numbers:
+            _LOGGER.info("Нет сертификатов для копирования")
+            return report
+
+        index = CertificateFileIndex(self._source_dir, recursive=self._recursive)
+        sources: list[tuple[str, Path]] = []
+        for number in numbers:
+            path = index.find(number)
+            if path is None:
+                report.missing.append(number)
+                _LOGGER.warning("PDF-файл сертификата не найден: %s", number)
+                continue
+            sources.append((number, path))
 
         if not sources:
-            _LOGGER.info("Нет сертификатов для копирования")
             return report
 
         try:
@@ -126,23 +154,16 @@ class CertificateCopyService:
             reporter.start(len(sources), "Копирование сертификатов", "copying")
 
         used_names: set[str] = set()
-        for source in sources:
+        for number, source in sources:
             if reporter is not None:
                 reporter.token.raise_if_cancelled()
-
-            if not source.exists():
-                report.missing.append(source.name)
-                _LOGGER.warning("Файл сертификата отсутствует: %s", source)
-                if reporter is not None:
-                    reporter.advance(1, stage="copying")
-                continue
 
             target = self._unique_target(destination, source.name, used_names)
             try:
                 shutil.copy2(source, target)
                 used_names.add(target.name)
                 report.copied += 1
-                report.mapping[str(source)] = target
+                report.mapping[number] = target
             except OSError as error:
                 report.failed.append((source.name, str(error)))
                 _LOGGER.warning("Не удалось скопировать %s: %s", source.name, error)

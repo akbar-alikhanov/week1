@@ -21,7 +21,6 @@ dependencies = [
     "rapidfuzz>=3.9.0",
     "numpy>=1.26.4",
     "python-dateutil>=2.9.0",
-    "watchdog>=4.0.1",
 ]
 
 [project.optional-dependencies]
@@ -134,7 +133,6 @@ module = [
     "fitz.*",
     "sentence_transformers.*",
     "tkinterdnd2.*",
-    "watchdog.*",
     "PIL.*",
     "pandas.*",
     "openpyxl.*",

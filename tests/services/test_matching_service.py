@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
@@ -16,7 +17,7 @@ from app.models.matching import MatchSource, MatchStatus
 from app.models.order import OrderRow
 from app.repositories.alias_repository import AliasRepository
 from app.repositories.cache_repository import CacheRepository
-from app.repositories.certificate_repository import CertificateRepository
+from app.repositories.certificate_product_repository import CertificateProductRepository
 from app.services.matching_service import MatchingService
 from tests.conftest import make_certificate
 
@@ -27,9 +28,9 @@ _PAST = _TODAY - dt.timedelta(days=30)
 
 
 @pytest.fixture
-def matching_service(tmp_path, database: Database) -> Iterator[MatchingService]:
+def matching_service(tmp_path: Path, database: Database) -> Iterator[MatchingService]:
     """Полностью собранный сервис подбора поверх временной базы данных."""
-    certificates = CertificateRepository(database)
+    certificates = CertificateProductRepository(database)
     aliases = AliasRepository(database)
     settings_service = SettingsService(tmp_path / "settings.json")
     settings_service.load()
@@ -48,34 +49,31 @@ class TestAliasStage:
     для взвешенной оценки. Если наименование заказа найдено в словаре, весь
     остальной подбор (RapidFuzz, Sentence Transformers, любая оценка «по
     процентам», пороги принятия решений) для этой строки не выполняется —
-    в справочнике ищут только строгим равенством наименования и объёма,
-    зафиксированных в самой записи, а выбор между найденными сертификатами
-    — только по ближайшему сроку годности. Каждый тест ниже проверяет одну
-    грань именно этого требования.
+    в базе сертификатов ищут только строгим SQL-равенством наименования и
+    объёма, зафиксированных в самой записи словаря, а выбор между найденными
+    строками — только по ближайшему сроку годности. Каждый тест ниже
+    проверяет одну грань именно этого требования.
     """
 
     def test_alias_matches_exact_name_and_volume(
         self,
         matching_service: MatchingService,
-        certificate_repository: CertificateRepository,
+        certificate_repository: CertificateProductRepository,
         alias_repository: AliasRepository,
     ) -> None:
         """Базовый случай: точное совпадение наименования и объёма из словаря."""
         certificate = make_certificate(
             "Лечебные травы 100 мл",
-            "/c/aliased.pdf",
-            volume_value=100.0,
-            volume_unit="ml",
+            volume_ml=100.0,
             expiry_date=_FUTURE,
+            certificate_number="aliased",
         )
-        certificate_repository.add(certificate)
+        certificate_repository.replace_all([certificate])
         alias_repository.save(
             Alias(
                 source_text="TP Herbal 100ml",
-                certificate_id=certificate.id,
                 target_name=certificate.product_name,
-                volume_value=100.0,
-                volume_unit="ml",
+                volume_ml=100.0,
             )
         )
 
@@ -84,13 +82,13 @@ class TestAliasStage:
         assert result.status is MatchStatus.MATCHED
         assert result.alias_applied
         assert result.certificate is not None
-        assert result.certificate.pdf_path == "/c/aliased.pdf"
+        assert result.certificate.certificate_number == "aliased"
         assert result.candidates[0].source is MatchSource.ALIAS
 
     def test_alias_ignores_lexically_similar_certificate_with_different_name(
         self,
         matching_service: MatchingService,
-        certificate_repository: CertificateRepository,
+        certificate_repository: CertificateProductRepository,
         alias_repository: AliasRepository,
     ) -> None:
         """Псевдоним не подменяется лексически похожим, но не тем же товаром.
@@ -101,54 +99,38 @@ class TestAliasStage:
         сертификат вообще не рассматривается.
         """
         lookalike = make_certificate(
-            "TP Herbal 100ml",
-            "/c/lookalike.pdf",
-            volume_value=100.0,
-            volume_unit="ml",
-            expiry_date=_FUTURE,
+            "TP Herbal 100ml", volume_ml=100.0, expiry_date=_FUTURE, certificate_number="lookalike"
         )
         real_target = make_certificate(
-            "Лечебные травы 100 мл",
-            "/c/real.pdf",
-            volume_value=100.0,
-            volume_unit="ml",
-            expiry_date=_FUTURE,
+            "Лечебные травы 100 мл", volume_ml=100.0, expiry_date=_FUTURE, certificate_number="real"
         )
-        certificate_repository.upsert_many([lookalike, real_target])
+        certificate_repository.replace_all([lookalike, real_target])
         alias_repository.save(
             Alias(
                 source_text="TP Herbal 100ml",
-                certificate_id=real_target.id,
                 target_name=real_target.product_name,
-                volume_value=100.0,
-                volume_unit="ml",
+                volume_ml=100.0,
             )
         )
 
         result = matching_service.match_row(OrderRow(row_number=1, product_name="TP Herbal 100ml"))
 
         assert result.certificate is not None
-        assert result.certificate.pdf_path == "/c/real.pdf"
+        assert result.certificate.certificate_number == "real"
 
     def test_alias_hit_is_registered(
         self,
         matching_service: MatchingService,
-        certificate_repository: CertificateRepository,
+        certificate_repository: CertificateProductRepository,
         alias_repository: AliasRepository,
     ) -> None:
         """Применение псевдонима увеличивает счётчик его использований."""
         certificate = make_certificate(
-            "Товар", "/c/1.pdf", volume_value=1.0, volume_unit="pcs", expiry_date=_FUTURE
+            "Товар", volume_ml=1.0, expiry_date=_FUTURE, certificate_number="1"
         )
-        certificate_repository.add(certificate)
+        certificate_repository.replace_all([certificate])
         alias = alias_repository.save(
-            Alias(
-                source_text="Псевдоним",
-                certificate_id=certificate.id,
-                target_name=certificate.product_name,
-                volume_value=1.0,
-                volume_unit="pcs",
-            )
+            Alias(source_text="Псевдоним", target_name=certificate.product_name, volume_ml=1.0)
         )
 
         matching_service.match_row(OrderRow(row_number=1, product_name="Псевдоним"))
@@ -167,7 +149,7 @@ class TestAliasStage:
         определённо исключил обращение к остальному конвейеру.
         """
         alias = alias_repository.save(
-            Alias(source_text="TP Herbal 100ml", target_name="Товар, которого нет в справочнике")
+            Alias(source_text="TP Herbal 100ml", target_name="Товар, которого нет в базе")
         )
 
         matching_service.match_row(OrderRow(row_number=1, product_name="TP Herbal 100ml"))
@@ -178,39 +160,31 @@ class TestAliasStage:
     def test_alias_picks_certificate_closest_to_requested_expiry(
         self,
         matching_service: MatchingService,
-        certificate_repository: CertificateRepository,
+        certificate_repository: CertificateProductRepository,
         alias_repository: AliasRepository,
     ) -> None:
-        """Среди строго совпавших по словарю сертификатов выбирается ближайший по сроку.
+        """Среди строго совпавших по словарю строк базы выбирается ближайшая по сроку.
 
-        Один и тот же товар подтверждён двумя сертификатами (переизданный
-        сертификат/другая партия) — псевдоним указывает на первый, но в
-        заказе запрошен срок, который точно совпадает со ВТОРЫМ. Должен
-        вернуться именно он.
+        Один и тот же товар подтверждён двумя строками базы (переизданный
+        сертификат/другая партия) — псевдоним указывает на первую по
+        наименованию, но в заказе запрошен срок, который точно совпадает со
+        ВТОРОЙ. Должна вернуться именно она.
         """
         original = make_certificate(
             "Лечебные травы 100 мл",
-            "/c/original.pdf",
-            volume_value=100.0,
-            volume_unit="ml",
+            volume_ml=100.0,
             expiry_date=_FUTURE,
+            certificate_number="original",
         )
         renewed = make_certificate(
             "Лечебные травы 100 мл",
-            "/c/renewed.pdf",
-            volume_value=100.0,
-            volume_unit="ml",
+            volume_ml=100.0,
             expiry_date=_NEAR_FUTURE,
+            certificate_number="renewed",
         )
-        certificate_repository.upsert_many([original, renewed])
+        certificate_repository.replace_all([original, renewed])
         alias_repository.save(
-            Alias(
-                source_text="TP Herbal 100ml",
-                certificate_id=original.id,
-                target_name=original.product_name,
-                volume_value=100.0,
-                volume_unit="ml",
-            )
+            Alias(source_text="TP Herbal 100ml", target_name=original.product_name, volume_ml=100.0)
         )
 
         result = matching_service.match_row(
@@ -219,44 +193,33 @@ class TestAliasStage:
 
         assert result.status is MatchStatus.MATCHED
         assert result.certificate is not None
-        assert result.certificate.pdf_path == "/c/renewed.pdf"
+        assert result.certificate.certificate_number == "renewed"
 
     def test_alias_never_returns_ambiguous_even_with_close_candidates(
         self,
         matching_service: MatchingService,
-        certificate_repository: CertificateRepository,
+        certificate_repository: CertificateProductRepository,
         alias_repository: AliasRepository,
     ) -> None:
-        """Выбор среди строго совпавших сертификатов детерминирован — не «требует проверки».
+        """Выбор среди строго совпавших строк базы детерминирован — не «требует проверки».
 
         Для обычных (не словарных) кандидатов близкие по оценке варианты
         дают статус AMBIGUOUS. Здесь наименование и объём уже подтверждены
-        точным совпадением, поэтому несколько сертификатов той же строгой
-        группы не приводят к неоднозначности — решает только ближайший срок.
+        точным совпадением, поэтому несколько строк той же строгой группы
+        не приводят к неоднозначности — решает только ближайший срок.
         """
         near = make_certificate(
             "Лечебные травы 100 мл",
-            "/c/near.pdf",
-            volume_value=100.0,
-            volume_unit="ml",
+            volume_ml=100.0,
             expiry_date=_NEAR_FUTURE,
+            certificate_number="near",
         )
         far = make_certificate(
-            "Лечебные травы 100 мл",
-            "/c/far.pdf",
-            volume_value=100.0,
-            volume_unit="ml",
-            expiry_date=_FUTURE,
+            "Лечебные травы 100 мл", volume_ml=100.0, expiry_date=_FUTURE, certificate_number="far"
         )
-        certificate_repository.upsert_many([near, far])
+        certificate_repository.replace_all([near, far])
         alias_repository.save(
-            Alias(
-                source_text="TP Herbal 100ml",
-                certificate_id=near.id,
-                target_name=near.product_name,
-                volume_value=100.0,
-                volume_unit="ml",
-            )
+            Alias(source_text="TP Herbal 100ml", target_name=near.product_name, volume_ml=100.0)
         )
 
         result = matching_service.match_row(
@@ -265,134 +228,110 @@ class TestAliasStage:
 
         assert result.status is MatchStatus.MATCHED
         assert result.certificate is not None
-        assert result.certificate.pdf_path == "/c/near.pdf"
+        assert result.certificate.certificate_number == "near"
 
     def test_alias_fefo_without_requested_expiry(
         self,
         matching_service: MatchingService,
-        certificate_repository: CertificateRepository,
+        certificate_repository: CertificateProductRepository,
         alias_repository: AliasRepository,
     ) -> None:
-        """Без требуемого срока выбирается самый ранний из строго совпавших сертификатов (FEFO)."""
+        """Без требуемого срока выбирается самая ранняя из строго совпавших строк (FEFO)."""
         soon = make_certificate(
             "Лечебные травы 100 мл",
-            "/c/soon.pdf",
-            volume_value=100.0,
-            volume_unit="ml",
+            volume_ml=100.0,
             expiry_date=_NEAR_FUTURE,
+            certificate_number="soon",
         )
         later = make_certificate(
             "Лечебные травы 100 мл",
-            "/c/later.pdf",
-            volume_value=100.0,
-            volume_unit="ml",
+            volume_ml=100.0,
             expiry_date=_FUTURE,
+            certificate_number="later",
         )
-        certificate_repository.upsert_many([soon, later])
+        certificate_repository.replace_all([soon, later])
         alias_repository.save(
-            Alias(
-                source_text="TP Herbal 100ml",
-                certificate_id=later.id,
-                target_name=later.product_name,
-                volume_value=100.0,
-                volume_unit="ml",
-            )
+            Alias(source_text="TP Herbal 100ml", target_name=later.product_name, volume_ml=100.0)
         )
 
         result = matching_service.match_row(OrderRow(row_number=1, product_name="TP Herbal 100ml"))
 
         assert result.certificate is not None
-        assert result.certificate.pdf_path == "/c/soon.pdf"
+        assert result.certificate.certificate_number == "soon"
 
-    def test_alias_survives_original_certificate_becoming_inactive(
+    def test_alias_survives_excel_reimport_with_new_ids(
         self,
         matching_service: MatchingService,
-        certificate_repository: CertificateRepository,
+        certificate_repository: CertificateProductRepository,
         alias_repository: AliasRepository,
     ) -> None:
-        """Псевдоним переживает исчезновение сертификата, выбранного при его создании.
+        """Псевдоним переживает переимпорт Excel-базы, даже если id строк изменились.
 
-        Файл, на который изначально ссылался псевдоним, удалён/переиздан
-        (деактивирован), но другой сертификат с тем же наименованием и
-        объёмом остался активным — подбор находит именно его: словарь
-        ищет по наименованию/объёму, а не по сохранённому certificate_id.
+        Полный переимпорт (:meth:`CertificateProductRepository.replace_all`)
+        всегда выдаёт всем строкам новые идентификаторы — подбор по словарю не
+        должен от этого сломаться, так как он ищет по наименованию и объёму,
+        а не по сохранённому id какой-либо конкретной строки.
         """
         original = make_certificate(
             "Лечебные травы 100 мл",
-            "/c/original.pdf",
-            volume_value=100.0,
-            volume_unit="ml",
+            volume_ml=100.0,
             expiry_date=_FUTURE,
+            certificate_number="original",
         )
-        certificate_repository.add(original)
+        certificate_repository.replace_all([original])
         alias_repository.save(
-            Alias(
-                source_text="TP Herbal 100ml",
-                certificate_id=original.id,
-                target_name=original.product_name,
-                volume_value=100.0,
-                volume_unit="ml",
-            )
+            Alias(source_text="TP Herbal 100ml", target_name=original.product_name, volume_ml=100.0)
         )
 
-        certificate_repository.deactivate_missing([])  # original.pdf исчез с диска
+        matching_service.invalidate()
         replacement = make_certificate(
             "Лечебные травы 100 мл",
-            "/c/replacement.pdf",
-            volume_value=100.0,
-            volume_unit="ml",
+            volume_ml=100.0,
             expiry_date=_FUTURE,
+            certificate_number="replacement",
         )
-        certificate_repository.add(replacement)
+        certificate_repository.replace_all([replacement])
 
         result = matching_service.match_row(OrderRow(row_number=1, product_name="TP Herbal 100ml"))
 
         assert result.alias_applied
         assert result.certificate is not None
-        assert result.certificate.pdf_path == "/c/replacement.pdf"
+        assert result.certificate.certificate_number == "replacement"
 
     def test_alias_skips_expired_certificate_in_favor_of_valid_one(
         self,
         matching_service: MatchingService,
-        certificate_repository: CertificateRepository,
+        certificate_repository: CertificateProductRepository,
         alias_repository: AliasRepository,
     ) -> None:
-        """Просроченный сертификат, найденный по данным псевдонима, отбраковывается."""
+        """Просроченная строка базы, найденная по данным псевдонима, отбраковывается."""
         expired = make_certificate(
             "Лечебные травы 100 мл",
-            "/c/expired.pdf",
-            volume_value=100.0,
-            volume_unit="ml",
+            volume_ml=100.0,
             expiry_date=_PAST,
+            certificate_number="expired",
         )
         valid = make_certificate(
             "Лечебные травы 100 мл",
-            "/c/valid.pdf",
-            volume_value=100.0,
-            volume_unit="ml",
+            volume_ml=100.0,
             expiry_date=_FUTURE,
+            certificate_number="valid",
         )
-        certificate_repository.upsert_many([expired, valid])
+        certificate_repository.replace_all([expired, valid])
         alias_repository.save(
-            Alias(
-                source_text="TP Herbal 100ml",
-                certificate_id=expired.id,
-                target_name=expired.product_name,
-                volume_value=100.0,
-                volume_unit="ml",
-            )
+            Alias(source_text="TP Herbal 100ml", target_name=expired.product_name, volume_ml=100.0)
         )
 
         result = matching_service.match_row(OrderRow(row_number=1, product_name="TP Herbal 100ml"))
 
         assert result.alias_applied
         assert result.certificate is not None
-        assert result.certificate.pdf_path == "/c/valid.pdf"
+        assert result.certificate.certificate_number == "valid"
 
     def test_alias_requires_exact_volume_not_within_tolerance(
         self,
         matching_service: MatchingService,
-        certificate_repository: CertificateRepository,
+        certificate_repository: CertificateProductRepository,
         alias_repository: AliasRepository,
     ) -> None:
         """Объём сравнивается строгим равенством, а не в пределах допуска на округление.
@@ -402,106 +341,87 @@ class TestAliasStage:
         требует точного равенства, «почти совпадающий» объём не подходит.
         """
         almost = make_certificate(
-            "Товар Х", "/c/99.9ml.pdf", volume_value=99.9, volume_unit="ml", expiry_date=_FUTURE
+            "Товар Х", volume_ml=99.9, expiry_date=_FUTURE, certificate_number="almost"
         )
         exact = make_certificate(
-            "Товар Х", "/c/100ml.pdf", volume_value=100.0, volume_unit="ml", expiry_date=_FUTURE
+            "Товар Х", volume_ml=100.0, expiry_date=_FUTURE, certificate_number="exact"
         )
-        certificate_repository.upsert_many([almost, exact])
+        certificate_repository.replace_all([almost, exact])
         alias_repository.save(
-            Alias(
-                source_text="TP Kh 100ml",
-                certificate_id=exact.id,
-                target_name="Товар Х",
-                volume_value=100.0,
-                volume_unit="ml",
-            )
+            Alias(source_text="TP Kh 100ml", target_name="Товар Х", volume_ml=100.0)
         )
 
         result = matching_service.match_row(OrderRow(row_number=1, product_name="TP Kh 100ml"))
 
         assert result.certificate is not None
-        assert result.certificate.pdf_path == "/c/100ml.pdf"
+        assert result.certificate.certificate_number == "exact"
 
     def test_alias_matches_by_dictionary_volume_even_when_order_text_implies_other_volume(
         self,
         matching_service: MatchingService,
-        certificate_repository: CertificateRepository,
+        certificate_repository: CertificateProductRepository,
         alias_repository: AliasRepository,
     ) -> None:
         """Подбор идёт по объёму, зафиксированному в словаре, а не по тексту заказа.
 
         В строке заказа явно написано «150ml», но псевдоним закрепляет за
-        этим текстом товар объёмом 100 мл — должен найтись именно
-        100-миллилитровый сертификат, объём из текста заказа не участвует.
+        этим текстом товар объёмом 100 мл — должна найтись именно
+        100-миллилитровая строка базы, объём из текста заказа не участвует.
         """
         wrong_volume = make_certificate(
-            "Товар Х", "/c/150ml.pdf", volume_value=150.0, volume_unit="ml", expiry_date=_FUTURE
+            "Товар Х", volume_ml=150.0, expiry_date=_FUTURE, certificate_number="150ml"
         )
         right_volume = make_certificate(
-            "Товар Х", "/c/100ml.pdf", volume_value=100.0, volume_unit="ml", expiry_date=_FUTURE
+            "Товар Х", volume_ml=100.0, expiry_date=_FUTURE, certificate_number="100ml"
         )
-        certificate_repository.upsert_many([wrong_volume, right_volume])
+        certificate_repository.replace_all([wrong_volume, right_volume])
         alias_repository.save(
-            Alias(
-                source_text="TP Kh 150ml",
-                certificate_id=right_volume.id,
-                target_name="Товар Х",
-                volume_value=100.0,
-                volume_unit="ml",
-            )
+            Alias(source_text="TP Kh 150ml", target_name="Товар Х", volume_ml=100.0)
         )
 
         result = matching_service.match_row(OrderRow(row_number=1, product_name="TP Kh 150ml"))
 
         assert result.alias_applied
         assert result.certificate is not None
-        assert result.certificate.pdf_path == "/c/100ml.pdf"
+        assert result.certificate.certificate_number == "100ml"
 
     def test_alias_without_dictionary_volume_matches_only_volumeless_certificates(
         self,
         matching_service: MatchingService,
-        certificate_repository: CertificateRepository,
+        certificate_repository: CertificateProductRepository,
         alias_repository: AliasRepository,
     ) -> None:
         """Если словарь не фиксирует объём, сравнение всё равно строгое — «пусто == пусто»."""
         with_volume = make_certificate(
-            "Товар Y",
-            "/c/with-volume.pdf",
-            volume_value=50.0,
-            volume_unit="ml",
-            expiry_date=_FUTURE,
+            "Товар Y", volume_ml=50.0, expiry_date=_FUTURE, certificate_number="with-volume"
         )
-        without_volume = make_certificate("Товар Y", "/c/no-volume.pdf", expiry_date=_FUTURE)
-        certificate_repository.upsert_many([with_volume, without_volume])
-        alias_repository.save(
-            Alias(source_text="TP Y", certificate_id=without_volume.id, target_name="Товар Y")
+        without_volume = make_certificate(
+            "Товар Y", expiry_date=_FUTURE, certificate_number="no-volume"
         )
+        certificate_repository.replace_all([with_volume, without_volume])
+        alias_repository.save(Alias(source_text="TP Y", target_name="Товар Y"))
 
         result = matching_service.match_row(OrderRow(row_number=1, product_name="TP Y"))
 
         assert result.certificate is not None
-        assert result.certificate.pdf_path == "/c/no-volume.pdf"
+        assert result.certificate.certificate_number == "no-volume"
 
     def test_alias_with_dictionary_volume_and_no_matching_certificate_is_not_found(
         self,
         matching_service: MatchingService,
-        certificate_repository: CertificateRepository,
+        certificate_repository: CertificateProductRepository,
         alias_repository: AliasRepository,
     ) -> None:
-        """Если сертификата на объём, зафиксированный в словаре, нет — статус «не найден»."""
-        certificate_repository.add(
-            make_certificate(
-                "Товар Х", "/c/150ml.pdf", volume_value=150.0, volume_unit="ml", expiry_date=_FUTURE
-            )
+        """Если строки базы на объём, зафиксированный в словаре, нет — статус «не найден»."""
+        certificate_repository.replace_all(
+            [
+                make_certificate(
+                    "Товар Х", volume_ml=150.0, expiry_date=_FUTURE, certificate_number="150ml"
+                )
+            ]
         )
         alias_repository.save(
-            Alias(
-                source_text="TP Kh 100ml",
-                target_name="Товар Х",
-                volume_value=100.0,
-                volume_unit="ml",
-            )
+            Alias(source_text="TP Kh 100ml", target_name="Товар Х", volume_ml=100.0)
         )
 
         result = matching_service.match_row(OrderRow(row_number=1, product_name="TP Kh 100ml"))
@@ -514,30 +434,21 @@ class TestAliasStage:
     def test_alias_strict_miss_does_not_fall_back_to_fuzzy_search(
         self,
         matching_service: MatchingService,
-        certificate_repository: CertificateRepository,
+        certificate_repository: CertificateProductRepository,
         alias_repository: AliasRepository,
     ) -> None:
         """Провал строгого подбора по словарю не подменяется похожим товаром.
 
-        Есть лексически похожий сертификат другого объёма, который обычный
+        Есть лексически похожая строка базы другого объёма, которую обычный
         нечёткий поиск нашёл бы — но раз товар распознан по словарю, подбор
-        должен остановиться на «не найдено», а не тихо подставить его.
+        должен остановиться на «не найдено», а не тихо подставить её.
         """
         lookalike = make_certificate(
-            "Товар Х",
-            "/c/lookalike.pdf",
-            volume_value=250.0,
-            volume_unit="ml",
-            expiry_date=_FUTURE,
+            "Товар Х", volume_ml=250.0, expiry_date=_FUTURE, certificate_number="lookalike"
         )
-        certificate_repository.add(lookalike)
+        certificate_repository.replace_all([lookalike])
         alias_repository.save(
-            Alias(
-                source_text="TP Kh 100ml",
-                target_name="Товар Х",
-                volume_value=100.0,
-                volume_unit="ml",
-            )
+            Alias(source_text="TP Kh 100ml", target_name="Товар Х", volume_ml=100.0)
         )
 
         result = matching_service.match_row(OrderRow(row_number=1, product_name="TP Kh 100ml"))
@@ -550,14 +461,9 @@ class TestAliasStage:
         matching_service: MatchingService,
         alias_repository: AliasRepository,
     ) -> None:
-        """Пустой справочник сертификатов не роняет подбор по словарю — просто «не найдено»."""
+        """Пустая база сертификатов не роняет подбор по словарю — просто «не найдено»."""
         alias_repository.save(
-            Alias(
-                source_text="TP Kh 100ml",
-                target_name="Товар Х",
-                volume_value=100.0,
-                volume_unit="ml",
-            )
+            Alias(source_text="TP Kh 100ml", target_name="Товар Х", volume_ml=100.0)
         )
 
         result = matching_service.match_row(OrderRow(row_number=1, product_name="TP Kh 100ml"))
@@ -569,17 +475,13 @@ class TestLexicalStage:
     """Проверки лексического подбора и автоматического принятия решений."""
 
     def test_exact_name_and_volume_match_is_auto_accepted(
-        self, matching_service: MatchingService, certificate_repository: CertificateRepository
+        self,
+        matching_service: MatchingService,
+        certificate_repository: CertificateProductRepository,
     ) -> None:
         """Точное совпадение наименования и объёма принимается автоматически."""
-        certificate_repository.add(
-            make_certificate(
-                "Лечебные травы, сироп 100 мл",
-                "/c/1.pdf",
-                volume_value=100.0,
-                volume_unit="ml",
-                expiry_date=_FUTURE,
-            )
+        certificate_repository.replace_all(
+            [make_certificate("Лечебные травы, сироп 100 мл", volume_ml=100.0, expiry_date=_FUTURE)]
         )
         result = matching_service.match_row(
             OrderRow(row_number=1, product_name="Лечебные травы, сироп 100 мл")
@@ -589,17 +491,13 @@ class TestLexicalStage:
         assert result.score > 0.9
 
     def test_unrelated_product_not_found(
-        self, matching_service: MatchingService, certificate_repository: CertificateRepository
+        self,
+        matching_service: MatchingService,
+        certificate_repository: CertificateProductRepository,
     ) -> None:
         """Совершенно непохожий товар не подбирается."""
-        certificate_repository.add(
-            make_certificate(
-                "Лечебные травы, сироп 100 мл",
-                "/c/1.pdf",
-                volume_value=100.0,
-                volume_unit="ml",
-                expiry_date=_FUTURE,
-            )
+        certificate_repository.replace_all(
+            [make_certificate("Лечебные травы, сироп 100 мл", volume_ml=100.0, expiry_date=_FUTURE)]
         )
         result = matching_service.match_row(
             OrderRow(row_number=1, product_name="Шампунь дегтярный 250 мл")
@@ -607,7 +505,9 @@ class TestLexicalStage:
         assert result.status is MatchStatus.NOT_FOUND
 
     def test_regression_shared_volume_does_not_cause_false_match(
-        self, matching_service: MatchingService, certificate_repository: CertificateRepository
+        self,
+        matching_service: MatchingService,
+        certificate_repository: CertificateProductRepository,
     ) -> None:
         """Товары с общим объёмом, но разным названием, не путаются друг с другом.
 
@@ -615,14 +515,8 @@ class TestLexicalStage:
         сопоставлялся с «Сироп шиповника 250 мл» на основании частичного
         текстового совпадения, усиленного объёмным сходством.
         """
-        certificate_repository.add(
-            make_certificate(
-                "Сироп шиповника 250 мл",
-                "/c/rosehip.pdf",
-                volume_value=250.0,
-                volume_unit="ml",
-                expiry_date=_FUTURE,
-            )
+        certificate_repository.replace_all(
+            [make_certificate("Сироп шиповника 250 мл", volume_ml=250.0, expiry_date=_FUTURE)]
         )
         result = matching_service.match_row(
             OrderRow(row_number=1, product_name="Крем-гель для душа морской 400 мл")
@@ -630,17 +524,13 @@ class TestLexicalStage:
         assert result.status is MatchStatus.NOT_FOUND
 
     def test_strict_volume_prevents_wrong_size_auto_accept(
-        self, matching_service: MatchingService, certificate_repository: CertificateRepository
+        self,
+        matching_service: MatchingService,
+        certificate_repository: CertificateProductRepository,
     ) -> None:
-        """Сертификат другой фасовки того же товара не принимается автоматически."""
-        certificate_repository.add(
-            make_certificate(
-                "Лечебные травы, сироп 150 мл",
-                "/c/150.pdf",
-                volume_value=150.0,
-                volume_unit="ml",
-                expiry_date=_FUTURE,
-            )
+        """Строка базы другой фасовки того же товара не принимается автоматически."""
+        certificate_repository.replace_all(
+            [make_certificate("Лечебные травы, сироп 150 мл", volume_ml=150.0, expiry_date=_FUTURE)]
         )
         result = matching_service.match_row(
             OrderRow(row_number=1, product_name="Лечебные травы, сироп 100 мл")
@@ -648,13 +538,13 @@ class TestLexicalStage:
         assert result.status is not MatchStatus.MATCHED
 
     def test_expired_certificate_excluded_by_default(
-        self, matching_service: MatchingService, certificate_repository: CertificateRepository
+        self,
+        matching_service: MatchingService,
+        certificate_repository: CertificateProductRepository,
     ) -> None:
-        """Просроченный сертификат не подбирается при настройках по умолчанию."""
-        certificate_repository.add(
-            make_certificate(
-                "Товар", "/c/1.pdf", volume_value=100.0, volume_unit="ml", expiry_date=_PAST
-            )
+        """Просроченная строка базы не подбирается при настройках по умолчанию."""
+        certificate_repository.replace_all(
+            [make_certificate("Товар", volume_ml=100.0, expiry_date=_PAST)]
         )
         result = matching_service.match_row(OrderRow(row_number=1, product_name="Товар 100 мл"))
         assert result.status is MatchStatus.NOT_FOUND
@@ -669,26 +559,16 @@ class TestAmbiguity:
     """Проверки распознавания неоднозначных ситуаций."""
 
     def test_multiple_close_candidates_marked_ambiguous(
-        self, matching_service: MatchingService, certificate_repository: CertificateRepository
+        self,
+        matching_service: MatchingService,
+        certificate_repository: CertificateProductRepository,
     ) -> None:
-        """Несколько сертификатов на разные товары с близкой оценкой требуют проверки."""
-        certificate_repository.add(
-            make_certificate(
-                "Крем детский увлажняющий",
-                "/c/1.pdf",
-                volume_value=45.0,
-                volume_unit="g",
-                expiry_date=_FUTURE,
-            )
-        )
-        certificate_repository.add(
-            make_certificate(
-                "Крем детский защитный",
-                "/c/2.pdf",
-                volume_value=45.0,
-                volume_unit="g",
-                expiry_date=_NEAR_FUTURE,
-            )
+        """Несколько строк базы на разные товары с близкой оценкой требуют проверки."""
+        certificate_repository.replace_all(
+            [
+                make_certificate("Крем детский увлажняющий", volume_ml=45.0, expiry_date=_FUTURE),
+                make_certificate("Крем детский защитный", volume_ml=45.0, expiry_date=_NEAR_FUTURE),
+            ]
         )
         result = matching_service.match_row(
             OrderRow(row_number=1, product_name="Крем детский 45 г")
@@ -697,24 +577,21 @@ class TestAmbiguity:
         assert len(result.candidates) >= 2
 
     def test_same_product_different_expiry_auto_resolved_by_fefo(
-        self, matching_service: MatchingService, certificate_repository: CertificateRepository
+        self,
+        matching_service: MatchingService,
+        certificate_repository: CertificateProductRepository,
     ) -> None:
         """Один и тот же товар с разными сроками разрешается автоматически (FEFO)."""
         near = make_certificate(
             "Лечебные травы 100 мл",
-            "/c/near.pdf",
-            volume_value=100.0,
-            volume_unit="ml",
+            volume_ml=100.0,
             expiry_date=_NEAR_FUTURE,
+            certificate_number="near",
         )
         far = make_certificate(
-            "Лечебные травы 100 мл",
-            "/c/far.pdf",
-            volume_value=100.0,
-            volume_unit="ml",
-            expiry_date=_FUTURE,
+            "Лечебные травы 100 мл", volume_ml=100.0, expiry_date=_FUTURE, certificate_number="far"
         )
-        certificate_repository.upsert_many([near, far])
+        certificate_repository.replace_all([near, far])
 
         result = matching_service.match_row(
             OrderRow(row_number=1, product_name="Лечебные травы 100 мл")
@@ -722,53 +599,55 @@ class TestAmbiguity:
 
         assert result.status is MatchStatus.MATCHED
         assert result.certificate is not None
-        assert result.certificate.pdf_path == "/c/near.pdf"
+        assert result.certificate.certificate_number == "near"
 
 
 class TestFindCandidates:
     """Проверки поиска кандидатов для окна неоднозначного выбора."""
 
     def test_includes_other_volumes_of_same_product(
-        self, matching_service: MatchingService, certificate_repository: CertificateRepository
+        self,
+        matching_service: MatchingService,
+        certificate_repository: CertificateProductRepository,
     ) -> None:
         """Результат включает соседние фасовки того же товара."""
-        certificate_repository.add(
-            make_certificate(
-                "Лечебные травы, сироп 100 мл",
-                "/c/100.pdf",
-                volume_value=100.0,
-                volume_unit="ml",
-                expiry_date=_FUTURE,
-            )
-        )
-        certificate_repository.add(
-            make_certificate(
-                "Лечебные травы, сироп 150 мл",
-                "/c/150.pdf",
-                volume_value=150.0,
-                volume_unit="ml",
-                expiry_date=_FUTURE,
-            )
+        certificate_repository.replace_all(
+            [
+                make_certificate(
+                    "Лечебные травы, сироп 100 мл",
+                    volume_ml=100.0,
+                    expiry_date=_FUTURE,
+                    certificate_number="100",
+                ),
+                make_certificate(
+                    "Лечебные травы, сироп 150 мл",
+                    volume_ml=150.0,
+                    expiry_date=_FUTURE,
+                    certificate_number="150",
+                ),
+            ]
         )
         candidates = matching_service.find_candidates(
             "Лечебные травы, сироп", include_other_volumes=True
         )
-        paths = {candidate.certificate.pdf_path for candidate in candidates}
-        assert "/c/100.pdf" in paths
-        assert "/c/150.pdf" in paths
+        numbers = {candidate.certificate.certificate_number for candidate in candidates}
+        assert "100" in numbers
+        assert "150" in numbers
 
 
 class TestInvalidate:
     """Проверки инвалидации индексов подбора."""
 
     def test_invalidate_forces_rebuild_on_next_prepare(
-        self, matching_service: MatchingService, certificate_repository: CertificateRepository
+        self,
+        matching_service: MatchingService,
+        certificate_repository: CertificateProductRepository,
     ) -> None:
         """После invalidate новый сертификат попадает в индекс при следующем prepare."""
         matching_service.prepare()
         assert matching_service.indexed_count == 0
 
-        certificate_repository.add(make_certificate("Новый товар", "/c/1.pdf", expiry_date=_FUTURE))
+        certificate_repository.replace_all([make_certificate("Новый товар", expiry_date=_FUTURE)])
         matching_service.invalidate()
         matching_service.prepare()
 

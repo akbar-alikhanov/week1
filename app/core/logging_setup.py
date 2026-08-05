@@ -43,7 +43,6 @@ _NOISY_LOGGERS: Final[tuple[str, ...]] = (
     "transformers",
     "torch",
     "huggingface_hub",
-    "watchdog",
     "numexpr",
 )
 

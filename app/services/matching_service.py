@@ -1,5 +1,11 @@
 """Многоэтапный подбор сертификата для строки заказа.
 
+Единственный источник данных о сертификатах — Excel-база, проиндексированная
+в SQLite (:class:`~app.repositories.certificate_product_repository.CertificateProductRepository`).
+PDF в подборе не участвуют вообще: они находятся по номеру сертификата и
+копируются в результат позже, отдельным шагом
+(:class:`~app.services.certificate_copy_service.CertificateCopyService`).
+
 Конвейер (порядок этапов задан требованиями и не подлежит изменению без
 пересмотра ожиданий пользователя):
 
@@ -7,10 +13,11 @@
    ещё один канал оценки. Если системное наименование заказа найдено в
    словаре, все остальные этапы (2–4) для этой строки не выполняются:
    ни нечёткий, ни семантический поиск, никакая оценка по процентам —
-   наименование и объём берутся из самой записи словаря и ищутся в
-   справочнике строгим равенством; из найденных сертификатов выбирается
-   только ближайший по сроку годности. Ничего не найдено строго —
-   строка считается ненайденной, к следующим этапам она не переходит.
+   наименование и объём берутся из самой записи словаря, и по ним
+   выполняется строгий поиск в SQLite (``normalized_name`` + ``volume_ml``);
+   из найденных строк базы выбирается только ближайшая по сроку годности.
+   Ничего не найдено строго — строка считается ненайденной, к следующим
+   этапам она не переходит.
 2. **Точное совпадение** нормализованных наименований.
 3. **Нечёткий поиск** (RapidFuzz) — основной источник кандидатов.
 4. **Семантический поиск** (Sentence Transformers) — подключается, когда
@@ -37,8 +44,7 @@ from app.ai.vector_index import VectorIndex
 from app.config.settings import SettingsService
 from app.core.events import ProgressReporter
 from app.core.text import normalize
-from app.models.alias import Alias
-from app.models.certificate import Certificate
+from app.models.certificate_product import CertificateProduct
 from app.models.matching import (
     MatchCandidate,
     MatchResult,
@@ -48,7 +54,7 @@ from app.models.matching import (
 )
 from app.models.order import OrderRow
 from app.repositories.alias_repository import AliasRepository
-from app.repositories.certificate_repository import CertificateRepository
+from app.repositories.certificate_product_repository import CertificateProductRepository
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -63,7 +69,7 @@ class MatchingService:
 
     def __init__(
         self,
-        certificate_repository: CertificateRepository,
+        certificate_repository: CertificateProductRepository,
         alias_repository: AliasRepository,
         settings_service: SettingsService,
         embedding_backend: EmbeddingBackend,
@@ -72,7 +78,7 @@ class MatchingService:
         """Создаёт сервис подбора.
 
         Args:
-            certificate_repository: Доступ к справочнику сертификатов.
+            certificate_repository: Доступ к базе сертификатов (индекс над Excel).
             alias_repository: Доступ к таблице псевдонимов.
             settings_service: Источник параметров алгоритма.
             embedding_backend: Семантический бэкенд.
@@ -84,8 +90,8 @@ class MatchingService:
         self._backend = embedding_backend
         self._vectors = vector_index
         self._lexical: LexicalIndex | None = None
-        self._by_id: dict[int, Certificate] = {}
-        self._by_normalized: dict[str, list[Certificate]] = {}
+        self._by_id: dict[int, CertificateProduct] = {}
+        self._by_normalized: dict[str, list[CertificateProduct]] = {}
         self._lock = threading.RLock()
         self._prepared = False
 
@@ -101,7 +107,7 @@ class MatchingService:
         return len(self._by_id)
 
     def prepare(self, *, reporter: ProgressReporter | None = None, force: bool = False) -> int:
-        """Загружает справочник и строит индексы поиска.
+        """Загружает базу сертификатов и строит индексы поиска.
 
         Args:
             reporter: Приёмник прогресса (построение векторов небыстрое).
@@ -115,9 +121,7 @@ class MatchingService:
                 return len(self._by_id)
 
             settings = self._settings.current.matching
-            certificates = self._certificates.list_active(
-                include_expired=not settings.require_valid_expiry
-            )
+            certificates = self._certificates.list_all()
 
             self._by_id = {
                 certificate.id: certificate
@@ -151,7 +155,7 @@ class MatchingService:
             return len(self._by_id)
 
     def invalidate(self) -> None:
-        """Помечает индексы устаревшими (после изменения справочника)."""
+        """Помечает индексы устаревшими (после переимпорта базы)."""
         with self._lock:
             self._prepared = False
 
@@ -271,17 +275,18 @@ class MatchingService:
         Если системное наименование заказа найдено в словаре, весь остальной
         подбор для этой строки не выполняется: ни RapidFuzz, ни Sentence
         Transformers, ни какая-либо оценка «по процентам» не участвуют.
-        Наименование и объём берутся из самой записи словаря и ищутся в
-        справочнике строгим равенством (:meth:`_alias_strict_matches`) —
-        никаких похожих наименований и допусков. Среди найденных таким
-        образом сертификатов сравнивается только срок годности: выбирается
-        тот, что ближе всего к требуемой дате заказа.
+        Наименование и объём берутся из самой записи словаря, и по ним
+        выполняется строгий SQL-поиск в базе сертификатов
+        (:meth:`~app.repositories.certificate_product_repository.CertificateProductRepository.find_strict`)
+        — точное равенство, без допуска и без нечёткого/семантического
+        поиска. Среди найденных таким образом строк сравнивается только срок
+        годности: выбирается тот, что ближе всего к требуемой дате заказа.
 
-        Если запись словаря для товара есть, а строгий поиск не дал ни
-        одного сертификата, строка считается ненайденной здесь же — подбор
-        не откатывается к нечёткому/семантическому поиску по всему
-        справочнику: это решение человека, алгоритм не должен его подменять
-        похожим, но не тем товаром (другой объём/партия).
+        Если запись словаря для товара есть, а строгий поиск не дал ни одной
+        строки базы, строка считается ненайденной здесь же — подбор не
+        откатывается к нечёткому/семантическому поиску по всей базе: это
+        решение человека, алгоритм не должен его подменять похожим, но не тем
+        товаром (другой объём/партия).
 
         Args:
             row: Строка заказа.
@@ -303,9 +308,27 @@ class MatchingService:
         if alias.id is not None:
             self._aliases.register_hit(alias.id)
 
-        certificates = self._alias_strict_matches(alias, context)
+        normalized_target = alias.normalized_target
+        if not normalized_target:
+            return MatchResult(
+                row=row,
+                status=MatchStatus.NOT_FOUND,
+                alias_applied=True,
+                note=f"В словаре нет русского названия для «{alias.source_text}»",
+            )
+
+        settings = context.settings
+        certificates = self._certificates.find_strict(normalized_target, alias.volume_ml)
+        if settings.require_valid_expiry:
+            certificates = [
+                certificate
+                for certificate in certificates
+                if certificate.expiry_date is None
+                or certificate.expiry_date >= context.reference_date
+            ]
+
         if not certificates:
-            detail = alias.target_name or alias.source_text
+            detail = alias.target_name
             if alias.volume_label:
                 detail += f", {alias.volume_label}"
             return MatchResult(
@@ -342,43 +365,6 @@ class MatchingService:
             note=f"Применён псевдоним «{alias.source_text}»",
         )
 
-    def _alias_strict_matches(self, alias: Alias, context: ScoringContext) -> list[Certificate]:
-        """Ищет сертификаты строгим равенством наименования и объёма словаря.
-
-        Единственные критерии: ``certificate.normalized_name`` совпадает с
-        нормализованной формой ``alias.target_name``, а ``(volume_value,
-        volume_unit)`` сертификата равны тем же полям псевдонима — точно, без
-        допуска на округление и без нечёткого/семантического поиска. Товар
-        без объёма в словаре (оба поля пусты) соответствует только
-        сертификатам, у которых объём тоже не распознан — это тот же
-        буквальный случай равенства, а не особый.
-
-        Args:
-            alias: Запись словаря.
-            context: Общий контекст оценки (нужна дата — отсеять просроченные).
-
-        Returns:
-            Все действующие сертификаты, точно соответствующие записи.
-        """
-        key = normalize(alias.target_name) if alias.target_name else ""
-        if not key:
-            return []
-
-        settings = context.settings
-        volume_key = (alias.volume_value, alias.volume_unit)
-        matches: list[Certificate] = []
-        for certificate in self._by_normalized.get(key, ()):
-            if (certificate.volume_value, certificate.volume_unit) != volume_key:
-                continue
-            if (
-                settings.require_valid_expiry
-                and certificate.expiry_date is not None
-                and certificate.expiry_date < context.reference_date
-            ):
-                continue
-            matches.append(certificate)
-        return matches
-
     def _collect_candidates(
         self,
         row: OrderRow,
@@ -390,7 +376,7 @@ class MatchingService:
         """Этапы 2–6: сбор, фильтрация и оценка кандидатов."""
         settings = context.settings
         query = row.search_text
-        lexical_scores: dict[int, tuple[Certificate, float, MatchSource]] = {}
+        lexical_scores: dict[int, tuple[CertificateProduct, float, MatchSource]] = {}
 
         # Этап 2 — точное совпадение нормализованного наименования.
         for certificate in self._by_normalized.get(row.normalized_name, ()):
@@ -548,22 +534,24 @@ def _expiry_sort_key(candidate: MatchCandidate) -> tuple[int, int]:
     return (0, expiry.toordinal())
 
 
-def _closest_by_expiry(certificates: list[Certificate], requested: date | None) -> Certificate:
-    """Выбирает сертификат с ближайшим сроком годности среди строго совпавших по словарю.
+def _closest_by_expiry(
+    certificates: list[CertificateProduct], requested: date | None
+) -> CertificateProduct:
+    """Выбирает строку базы с ближайшим сроком годности среди совпавших по словарю.
 
     С требуемым сроком заказа — минимизирует абсолютную разницу в днях. Без
     него действует FEFO (first expired, first out): выбирается сертификат,
     истекающий раньше остальных, — расходуется первым, как и везде в
-    конвейере подбора. Сертификаты без распознанного срока считаются
-    наименее подходящими и рассматриваются в последнюю очередь.
+    конвейере подбора. Строки без распознанного срока считаются наименее
+    подходящими и рассматриваются в последнюю очередь.
 
     Args:
-        certificates: Сертификаты, уже прошедшие строгий отбор по словарю
+        certificates: Строки базы, уже прошедшие строгий отбор по словарю
             (непустой список).
         requested: Требуемый срок из строки заказа (может отсутствовать).
 
     Returns:
-        Единственный выбранный сертификат.
+        Единственная выбранная строка базы сертификатов.
     """
     if requested is not None:
         return min(

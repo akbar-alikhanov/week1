@@ -2,8 +2,9 @@
 
 Это тесты сценария «выбрать Excel → нажать кнопку» — главного требования
 продукта. Они проверяют не отдельный модуль, а весь путь: разбор заказа,
-подбор сертификатов, запись Excel, копирование PDF, формирование отчёта и
-историю, — так, как это происходит при реальном нажатии кнопки в интерфейсе.
+подбор сертификатов по базе (Excel, проиндексированной в SQLite), запись
+Excel, копирование PDF по номеру сертификата, формирование отчёта и историю,
+— так, как это происходит при реальном нажатии кнопки в интерфейсе.
 """
 
 from __future__ import annotations
@@ -25,7 +26,9 @@ from app.database.connection import Database  # noqa: E402
 from app.models.matching import MatchResult, MatchStatus  # noqa: E402
 from app.parsers.excel_order_parser import ExcelOrderParser  # noqa: E402
 from app.repositories.alias_repository import AliasRepository  # noqa: E402
-from app.repositories.certificate_repository import CertificateRepository  # noqa: E402
+from app.repositories.certificate_product_repository import (  # noqa: E402
+    CertificateProductRepository,
+)
 from app.repositories.history_repository import HistoryRepository  # noqa: E402
 from app.repositories.product_repository import ProductRepository  # noqa: E402
 from app.services.alias_service import AliasService  # noqa: E402
@@ -35,6 +38,7 @@ from app.services.order_processing_service import (  # noqa: E402
     ProcessingRequest,
 )
 from app.services.report_service import ReportService  # noqa: E402
+from tests.conftest import make_certificate  # noqa: E402
 
 _FUTURE = dt.date.today() + dt.timedelta(days=365 * 3)
 
@@ -53,7 +57,7 @@ def _build_order_file(path: Path, rows: list[tuple[str, int]]) -> None:
 @pytest.fixture
 def order_service(tmp_path: Path, database: Database) -> Iterator[OrderProcessingService]:
     """Полностью собранный оркестратор обработки заказа."""
-    certificates = CertificateRepository(database)
+    certificates = CertificateProductRepository(database)
     aliases = AliasRepository(database)
     products = ProductRepository(database)
     history = HistoryRepository(database)
@@ -61,6 +65,9 @@ def order_service(tmp_path: Path, database: Database) -> Iterator[OrderProcessin
     settings_service.load()
     settings_service.update(
         lambda settings: setattr(settings.export, "output_dir", str(tmp_path / "output"))
+    )
+    settings_service.update(
+        lambda settings: setattr(settings.certificates, "pdf_dir", str(tmp_path / "certs"))
     )
 
     backend = EmbeddingBackend(enabled=False)
@@ -79,33 +86,26 @@ def order_service(tmp_path: Path, database: Database) -> Iterator[OrderProcessin
         alias_service=alias_service,
     )
 
-    # Наполняем справочник сертификатов, как если бы папку уже проиндексировали.
-    from tests.conftest import make_certificate
-
-    certificates.upsert_many(
+    # Наполняем базу сертификатов, как если бы Excel-файл уже импортировали.
+    certificates.replace_all(
         [
             make_certificate(
                 "Лечебные травы, сироп 100 мл",
-                str(tmp_path / "certs" / "180001.pdf"),
-                volume_value=100.0,
-                volume_unit="ml",
                 expiry_date=_FUTURE,
                 certificate_number="UZ.180001",
             ),
             make_certificate(
                 "Масло облепиховое 100 мл",
-                str(tmp_path / "certs" / "180002.pdf"),
-                volume_value=100.0,
-                volume_unit="ml",
                 expiry_date=_FUTURE,
                 certificate_number="UZ.180002",
             ),
         ]
     )
-    # Файлы должны реально существовать — их будет копировать CertificateCopyService.
+    # Файлы должны реально существовать — их будет копировать CertificateCopyService,
+    # находя по номеру сертификата в имени файла.
     (tmp_path / "certs").mkdir()
-    (tmp_path / "certs" / "180001.pdf").write_bytes(b"%PDF-1.4 fake")
-    (tmp_path / "certs" / "180002.pdf").write_bytes(b"%PDF-1.4 fake")
+    (tmp_path / "certs" / "UZ.180001.pdf").write_bytes(b"%PDF-1.4 fake")
+    (tmp_path / "certs" / "UZ.180002.pdf").write_bytes(b"%PDF-1.4 fake")
 
     yield service
 
@@ -134,7 +134,7 @@ class TestFullScenario:
     def test_process_copies_certificate_pdfs(
         self, order_service: OrderProcessingService, tmp_path: Path
     ) -> None:
-        """Найденные сертификаты копируются в папку Certificates."""
+        """Найденные сертификаты копируются в папку Certificates по номеру."""
         order_path = tmp_path / "Заказ.xlsx"
         _build_order_file(order_path, [("Лечебные травы, сироп 100 мл", 10)])
 
@@ -177,7 +177,7 @@ class TestFullScenario:
     def test_unknown_product_marked_not_found(
         self, order_service: OrderProcessingService, tmp_path: Path
     ) -> None:
-        """Товар, отсутствующий в справочнике, помечается как не найденный."""
+        """Товар, отсутствующий в базе, помечается как не найденный."""
         order_path = tmp_path / "Заказ.xlsx"
         _build_order_file(order_path, [("Совершенно неизвестный товар XYZ", 5)])
 
@@ -190,25 +190,18 @@ class TestFullScenario:
         self,
         order_service: OrderProcessingService,
         tmp_path: Path,
-        certificate_repository: CertificateRepository,
+        certificate_repository: CertificateProductRepository,
     ) -> None:
         """Ручной выбор пользователя в окне неоднозначности применяется к результату."""
         # Добавляем второй, менее подходящий вариант того же товара,
         # чтобы гарантированно получить неоднозначность.
-        from tests.conftest import make_certificate
-
-        rival_path = tmp_path / "certs" / "180099.pdf"
-        rival_path.write_bytes(b"%PDF-1.4 fake")
-        certificate_repository.add(
-            make_certificate(
-                "Лечебные травы, сироп 200 мл",
-                str(rival_path),
-                volume_value=200.0,
-                volume_unit="ml",
-                expiry_date=_FUTURE,
-                certificate_number="UZ.180099",
-            )
+        rival = make_certificate(
+            "Лечебные травы, сироп 200 мл",
+            expiry_date=_FUTURE,
+            certificate_number="UZ.180099",
         )
+        certificate_repository.replace_all([*certificate_repository.list_all(), rival])
+        (tmp_path / "certs" / "UZ.180099.pdf").write_bytes(b"%PDF-1.4 fake")
 
         order_path = tmp_path / "Заказ.xlsx"
         _build_order_file(order_path, [("Лечебные травы, сироп", 5)])
@@ -230,22 +223,13 @@ class TestFullScenario:
         self,
         order_service: OrderProcessingService,
         tmp_path: Path,
-        certificate_repository: CertificateRepository,
+        certificate_repository: CertificateProductRepository,
     ) -> None:
         """Пропуск позиции в окне неоднозначности переводит её в «не найдено»."""
-        from tests.conftest import make_certificate
-
-        rival_path = tmp_path / "certs" / "180099.pdf"
-        rival_path.write_bytes(b"%PDF-1.4 fake")
-        certificate_repository.add(
-            make_certificate(
-                "Лечебные травы, сироп 200 мл",
-                str(rival_path),
-                volume_value=200.0,
-                volume_unit="ml",
-                expiry_date=_FUTURE,
-            )
+        rival = make_certificate(
+            "Лечебные травы, сироп 200 мл", expiry_date=_FUTURE, certificate_number="UZ.180099"
         )
+        certificate_repository.replace_all([*certificate_repository.list_all(), rival])
 
         order_path = tmp_path / "Заказ.xlsx"
         _build_order_file(order_path, [("Лечебные травы, сироп", 5)])
@@ -285,31 +269,20 @@ class TestSelfLearningConsent:
     равно создавал псевдоним — отказ пользователя тихо игнорировался.
     """
 
-    def _add_rival(self, tmp_path: Path, certificate_repository: CertificateRepository) -> None:
+    def _add_rival(self, certificate_repository: CertificateProductRepository) -> None:
         """Добавляет второй вариант товара, чтобы гарантировать неоднозначность."""
-        from tests.conftest import make_certificate
-
-        rival_path = tmp_path / "certs" / "180099.pdf"
-        rival_path.write_bytes(b"%PDF-1.4 fake")
-        certificate_repository.add(
-            make_certificate(
-                "Лечебные травы, сироп 200 мл",
-                str(rival_path),
-                volume_value=200.0,
-                volume_unit="ml",
-                expiry_date=_FUTURE,
-            )
-        )
+        rival = make_certificate("Лечебные травы, сироп 200 мл", expiry_date=_FUTURE)
+        certificate_repository.replace_all([*certificate_repository.list_all(), rival])
 
     def test_declining_to_remember_skips_alias_creation(
         self,
         order_service: OrderProcessingService,
         tmp_path: Path,
-        certificate_repository: CertificateRepository,
+        certificate_repository: CertificateProductRepository,
         alias_repository: AliasRepository,
     ) -> None:
         """Признак отказа, выставленный резолвером, должен блокировать самообучение."""
-        self._add_rival(tmp_path, certificate_repository)
+        self._add_rival(certificate_repository)
         order_path = tmp_path / "Заказ.xlsx"
         _build_order_file(order_path, [("Лечебные травы, сироп", 5)])
 
@@ -328,11 +301,11 @@ class TestSelfLearningConsent:
         self,
         order_service: OrderProcessingService,
         tmp_path: Path,
-        certificate_repository: CertificateRepository,
+        certificate_repository: CertificateProductRepository,
         alias_repository: AliasRepository,
     ) -> None:
         """Без отказа ручной выбор в окне неоднозначности запоминается как обычно."""
-        self._add_rival(tmp_path, certificate_repository)
+        self._add_rival(certificate_repository)
         order_path = tmp_path / "Заказ.xlsx"
         _build_order_file(order_path, [("Лечебные травы, сироп", 5)])
 

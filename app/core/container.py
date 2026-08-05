@@ -27,17 +27,16 @@ from app.parsers.excel_order_parser import ExcelOrderParser
 from app.parsers.pdf_parser import PdfParser
 from app.repositories.alias_repository import AliasRepository
 from app.repositories.cache_repository import CacheRepository
-from app.repositories.certificate_repository import CertificateRepository
+from app.repositories.certificate_product_repository import CertificateProductRepository
 from app.repositories.history_repository import HistoryRepository
 from app.repositories.product_repository import ProductRepository
 from app.repositories.settings_repository import SettingsRepository
 from app.services.alias_service import AliasService
 from app.services.backup_service import BackupService
-from app.services.indexing_service import IndexingService
+from app.services.certificate_import_service import CertificateImportService
 from app.services.matching_service import MatchingService
 from app.services.order_processing_service import OrderProcessingService
 from app.services.report_service import ReportService
-from app.services.watcher_service import CertificateWatcher
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -65,8 +64,8 @@ class ApplicationContainer:
 
         self._settings_service = Lazy(self._create_settings_service)
         self._database = Lazy(self._create_database)
-        self._certificate_repository: Lazy[CertificateRepository] = Lazy(
-            lambda: CertificateRepository(self.database)
+        self._certificate_repository: Lazy[CertificateProductRepository] = Lazy(
+            lambda: CertificateProductRepository(self.database)
         )
         self._alias_repository: Lazy[AliasRepository] = Lazy(lambda: AliasRepository(self.database))
         self._product_repository: Lazy[ProductRepository] = Lazy(
@@ -86,11 +85,10 @@ class ApplicationContainer:
         )
 
         self._matching_service = Lazy(self._create_matching_service)
-        self._indexing_service = Lazy(self._create_indexing_service)
+        self._certificate_import_service = Lazy(self._create_certificate_import_service)
         self._alias_service = Lazy(self._create_alias_service)
         self._order_service = Lazy(self._create_order_service)
         self._backup_service = Lazy(self._create_backup_service)
-        self._watcher = Lazy(self._create_watcher)
         self._report_service: Lazy[ReportService] = Lazy(ReportService)
         self._excel_parser: Lazy[ExcelOrderParser] = Lazy(ExcelOrderParser)
         self._pdf_parser: Lazy[PdfParser] = Lazy(PdfParser)
@@ -152,8 +150,8 @@ class ApplicationContainer:
         return self._database.get()
 
     @property
-    def certificate_repository(self) -> CertificateRepository:
-        """Репозиторий сертификатов."""
+    def certificate_repository(self) -> CertificateProductRepository:
+        """Репозиторий базы сертификатов (индекс над Excel)."""
         return self._certificate_repository.get()
 
     @property
@@ -197,9 +195,9 @@ class ApplicationContainer:
         return self._matching_service.get()
 
     @property
-    def indexing_service(self) -> IndexingService:
-        """Сервис индексации папки сертификатов."""
-        return self._indexing_service.get()
+    def certificate_import_service(self) -> CertificateImportService:
+        """Сервис импорта Excel-базы сертификатов."""
+        return self._certificate_import_service.get()
 
     @property
     def alias_service(self) -> AliasService:
@@ -222,18 +220,13 @@ class ApplicationContainer:
         return self._backup_service.get()
 
     @property
-    def watcher(self) -> CertificateWatcher:
-        """Наблюдатель за папкой сертификатов."""
-        return self._watcher.get()
-
-    @property
     def excel_parser(self) -> ExcelOrderParser:
         """Парсер файлов заказа."""
         return self._excel_parser.get()
 
     @property
     def pdf_parser(self) -> PdfParser:
-        """Парсер PDF-сертификатов."""
+        """Просмотрщик PDF-сертификатов (только отрисовка страниц)."""
         return self._pdf_parser.get()
 
     @property
@@ -259,25 +252,9 @@ class ApplicationContainer:
 
         _LOGGER.info("Приложение инициализировано (%s)", self._paths.base)
 
-    def start_watcher(self) -> bool:
-        """Запускает наблюдение за папкой сертификатов, если это разрешено.
-
-        Returns:
-            ``True``, если наблюдение запущено.
-        """
-        indexing = self.settings.indexing
-        if not indexing.watch_enabled:
-            return False
-        directory = self.indexing_service.last_directory()
-        if not directory:
-            return False
-        return self.watcher.start(Path(directory), recursive=indexing.recursive)
-
     def shutdown(self) -> None:
         """Корректно завершает работу всех подсистем."""
         _LOGGER.info("Завершение работы приложения…")
-        if self._watcher.initialized:
-            self.watcher.stop()
         if self._background_pool.initialized:
             self.background_pool.shutdown(wait=False)
         if self._embedding_backend.initialized:
@@ -326,14 +303,10 @@ class ApplicationContainer:
             self.vector_index,
         )
 
-    def _create_indexing_service(self) -> IndexingService:
-        """Создаёт сервис индексации."""
-        return IndexingService(
-            self.certificate_repository,
-            self.alias_repository,
-            self.settings_repository,
-            self.settings_service,
-            self._events,
+    def _create_certificate_import_service(self) -> CertificateImportService:
+        """Создаёт сервис импорта Excel-базы сертификатов."""
+        return CertificateImportService(
+            self.certificate_repository, self.settings_repository, self._events
         )
 
     def _create_alias_service(self) -> AliasService:
@@ -364,20 +337,6 @@ class ApplicationContainer:
             retention=self.settings.maintenance.backup_retention,
         )
 
-    def _create_watcher(self) -> CertificateWatcher:
-        """Создаёт наблюдателя за папкой сертификатов."""
-        return CertificateWatcher(
-            self.indexing_service,
-            debounce_seconds=self.settings.indexing.watch_debounce_seconds,
-            on_change=self._on_watcher_change,
-        )
-
-    def _on_watcher_change(self, indexed: int, removed: int) -> None:
-        """Реагирует на изменения в папке сертификатов."""
-        if self._matching_service.initialized:
-            self.matching_service.invalidate()
-        self._events.publish("index.auto_updated", indexed=indexed, removed=removed)
-
     # ------------------------------------------------------------ диагностика
     def diagnostics(self) -> dict[str, Any]:
         """Собирает сведения о состоянии приложения.
@@ -399,7 +358,7 @@ class ApplicationContainer:
         }
         info.update(self._paths.describe())
         try:
-            info["Сертификатов в базе"] = self.certificate_repository.count("is_active = 1")
+            info["Сертификатов в базе"] = self.certificate_repository.count()
             info["Псевдонимов"] = self.alias_repository.count()
             info["Обработок в истории"] = self.history_repository.count()
         except Exception as error:
@@ -407,7 +366,4 @@ class ApplicationContainer:
 
         status = self.embedding_backend.status()
         info["Семантический поиск"] = status.message
-        info["Наблюдение за папкой"] = (
-            "доступно" if CertificateWatcher.available() else "недоступно (нет watchdog)"
-        )
         return info

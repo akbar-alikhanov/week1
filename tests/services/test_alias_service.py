@@ -15,7 +15,7 @@ from app.models.matching import (
 )
 from app.models.order import OrderRow
 from app.repositories.alias_repository import AliasRepository
-from app.repositories.certificate_repository import CertificateRepository
+from app.repositories.certificate_product_repository import CertificateProductRepository
 from app.services.alias_service import AliasService
 from tests.conftest import make_certificate
 
@@ -23,42 +23,34 @@ from tests.conftest import make_certificate
 @pytest.fixture
 def alias_service(database: Database) -> AliasService:
     """Собранный сервис псевдонимов поверх временной базы данных."""
-    return AliasService(AliasRepository(database), CertificateRepository(database), EventBus())
+    return AliasService(
+        AliasRepository(database), CertificateProductRepository(database), EventBus()
+    )
 
 
 class TestLearn:
     """Проверки создания псевдонима из ручного выбора."""
 
-    def test_learn_creates_alias(
-        self, alias_service: AliasService, certificate_repository: CertificateRepository
-    ) -> None:
-        """Обучение создаёт псевдоним, ссылающийся на выбранный сертификат."""
-        certificate = make_certificate("Лечебные травы 100 мл", "/c/1.pdf")
-        certificate_repository.add(certificate)
+    def test_learn_creates_alias(self, alias_service: AliasService) -> None:
+        """Обучение создаёт псевдоним с наименованием и объёмом выбранного товара."""
+        certificate = make_certificate("Лечебные травы 100 мл")
 
         alias = alias_service.learn("TP Herbal 100ml", certificate)
 
         assert alias.id is not None
-        assert alias.certificate_id == certificate.id
         assert alias.target_name == certificate.product_name
+        assert alias.volume_ml == certificate.volume_ml
 
-    def test_learn_without_saved_certificate_raises(self, alias_service: AliasService) -> None:
-        """Обучение на несохранённом сертификате (без id) порождает ошибку."""
-        certificate = make_certificate("Товар", "/c/1.pdf")
-        with pytest.raises(ValueError, match="несохранённого"):
-            alias_service.learn("Псевдоним", certificate)
-
-    def test_learn_publishes_event(
-        self, database: Database, certificate_repository: CertificateRepository
-    ) -> None:
+    def test_learn_publishes_event(self, database: Database) -> None:
         """Создание псевдонима публикует доменное событие."""
         events = EventBus()
         received: list[object] = []
         events.subscribe("alias.created", lambda **kwargs: received.append(kwargs.get("alias")))
 
-        service = AliasService(AliasRepository(database), certificate_repository, events)
-        certificate = make_certificate("Товар", "/c/1.pdf")
-        certificate_repository.add(certificate)
+        service = AliasService(
+            AliasRepository(database), CertificateProductRepository(database), events
+        )
+        certificate = make_certificate("Товар")
 
         service.learn("Псевдоним", certificate)
 
@@ -68,12 +60,9 @@ class TestLearn:
 class TestLearnFromResult:
     """Проверки обучения по результату подбора."""
 
-    def test_learn_from_result_with_selection(
-        self, alias_service: AliasService, certificate_repository: CertificateRepository
-    ) -> None:
+    def test_learn_from_result_with_selection(self, alias_service: AliasService) -> None:
         """Обучение по результату с выбранным кандидатом создаёт псевдоним."""
-        certificate = make_certificate("Товар", "/c/1.pdf")
-        certificate_repository.add(certificate)
+        certificate = make_certificate("Товар")
         score = ScoreBreakdown(name=0.9, volume=1.0, expiry=1.0, total=0.9)
         candidate = MatchCandidate(certificate=certificate, score=score, source=MatchSource.LEXICAL)
         result = MatchResult(
@@ -101,12 +90,9 @@ class TestLearnFromResult:
 class TestForget:
     """Проверки удаления псевдонимов."""
 
-    def test_forget_removes_alias(
-        self, alias_service: AliasService, certificate_repository: CertificateRepository
-    ) -> None:
+    def test_forget_removes_alias(self, alias_service: AliasService) -> None:
         """Удаление по идентификатору убирает псевдоним из хранилища."""
-        certificate = make_certificate("Товар", "/c/1.pdf")
-        certificate_repository.add(certificate)
+        certificate = make_certificate("Товар")
         alias = alias_service.learn("Псевдоним", certificate)
 
         assert alias_service.forget(alias.id)  # type: ignore[arg-type]
@@ -120,71 +106,44 @@ class TestForget:
 class TestDictionaryCrud:
     """Проверки явного управления словарём (раздел «Словарь товаров»)."""
 
-    def test_add_creates_manual_entry(
-        self, alias_service: AliasService, certificate_repository: CertificateRepository
-    ) -> None:
+    def test_add_creates_manual_entry(self, alias_service: AliasService) -> None:
         """Ручное добавление создаёт запись с полным доверием."""
-        certificate = make_certificate("Товар", "/c/1.pdf")
-        certificate_repository.add(certificate)
-
-        alias = alias_service.add("Системное имя", certificate, brand="Balton")
+        alias = alias_service.add("Системное имя", "Товар", brand="Balton")
 
         assert alias.is_manual is True
         assert alias.confidence == 100.0
         assert alias.brand == "Balton"
 
     def test_find_potential_duplicates_detects_close_variant(
-        self, alias_service: AliasService, certificate_repository: CertificateRepository
+        self, alias_service: AliasService
     ) -> None:
         """Проверка дубликатов находит близкий, но не идентичный вариант."""
-        certificate = make_certificate("Товар", "/c/1.pdf")
-        certificate_repository.add(certificate)
-        alias_service.add("TP Herbal 100ml", certificate)
+        alias_service.add("TP Herbal 100ml", "Товар")
 
         warning = alias_service.find_potential_duplicates("TP Herbal 100 ml")
 
         assert warning.has_matches
 
-    def test_update_resyncs_pdf_name_on_certificate_change(
-        self, alias_service: AliasService, certificate_repository: CertificateRepository
-    ) -> None:
-        """Изменение привязанного сертификата подтягивает актуальное имя PDF."""
-        first = make_certificate("Товар A", "/c/1.pdf")
-        first.pdf_name = "1.pdf"
-        second = make_certificate("Товар B", "/c/2.pdf")
-        second.pdf_name = "2.pdf"
-        certificate_repository.add(first)
-        certificate_repository.add(second)
+    def test_update_changes_volume(self, alias_service: AliasService) -> None:
+        """Изменение записи обновляет объём независимо от текущей базы."""
+        alias = alias_service.add("Системное имя", "Товар A", volume_ml=100.0)
+        updated = alias_service.update(alias.id, volume_ml=150.0)  # type: ignore[arg-type]
 
-        alias = alias_service.add("Системное имя", first)
-        updated = alias_service.update(alias.id, certificate_id=second.id)  # type: ignore[arg-type]
+        assert updated.volume_ml == 150.0
 
-        assert updated.certificate_id == second.id
-        assert updated.target_pdf_name == "2.pdf"
-
-    def test_bulk_delete_removes_multiple(
-        self, alias_service: AliasService, certificate_repository: CertificateRepository
-    ) -> None:
+    def test_bulk_delete_removes_multiple(self, alias_service: AliasService) -> None:
         """Массовое удаление через сервис убирает все указанные записи."""
-        first = make_certificate("Товар A", "/c/1.pdf")
-        second = make_certificate("Товар B", "/c/2.pdf")
-        certificate_repository.add(first)
-        certificate_repository.add(second)
-        one = alias_service.add("Товар A", first)
-        two = alias_service.add("Товар B", second)
+        one = alias_service.add("Товар A", "A")
+        two = alias_service.add("Товар B", "B")
 
         removed = alias_service.bulk_delete([one.id, two.id])  # type: ignore[list-item]
 
         assert removed == 2
         assert alias_service.count() == 0
 
-    def test_undo_last_reverts_most_recent_action(
-        self, alias_service: AliasService, certificate_repository: CertificateRepository
-    ) -> None:
+    def test_undo_last_reverts_most_recent_action(self, alias_service: AliasService) -> None:
         """Отмена последнего действия восстанавливает словарь до предыдущего состояния."""
-        certificate = make_certificate("Товар", "/c/1.pdf")
-        certificate_repository.add(certificate)
-        alias = alias_service.add("Товар", certificate)
+        alias = alias_service.add("Товар", "Товар")
         assert alias.id is not None
         alias_service.forget(alias.id)
         assert alias_service.count() == 0
@@ -197,3 +156,29 @@ class TestDictionaryCrud:
     def test_undo_last_with_nothing_to_undo_returns_none(self, alias_service: AliasService) -> None:
         """Отмена без предшествующих действий не вызывает ошибку."""
         assert alias_service.undo_last() is None
+
+
+class TestFindRelatedCertificates:
+    """Проверки предпросмотра текущего разрешения записи словаря."""
+
+    def test_finds_strict_match_in_database(
+        self, alias_service: AliasService, certificate_repository: CertificateProductRepository
+    ) -> None:
+        """Показывается именно то, что найдёт строгий поиск алгоритма подбора."""
+        certificate_repository.replace_all(
+            [make_certificate("Лечебные травы 100 мл", volume_ml=100.0)]
+        )
+        alias = alias_service.add("TP Herbal", "Лечебные травы 100 мл", volume_ml=100.0)
+
+        related = alias_service.find_related_certificates(alias)
+
+        assert len(related) == 1
+        assert related[0].product_name == "Лечебные травы 100 мл"
+
+    def test_empty_when_nothing_matches(
+        self, alias_service: AliasService, certificate_repository: CertificateProductRepository
+    ) -> None:
+        """Пустой результат, если строгий поиск ничего не находит."""
+        alias = alias_service.add("TP Herbal", "Товар, которого нет в базе")
+
+        assert alias_service.find_related_certificates(alias) == []

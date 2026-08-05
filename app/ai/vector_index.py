@@ -23,7 +23,7 @@ from app.ai.embeddings import (
 )
 from app.core.events import ProgressReporter
 from app.core.text import normalize
-from app.models.certificate import Certificate
+from app.models.certificate_product import CertificateProduct
 from app.repositories.cache_repository import CacheRepository
 
 _LOGGER = logging.getLogger(__name__)
@@ -80,26 +80,20 @@ class VectorIndex:
 
     # ------------------------------------------------------------- построение
     @staticmethod
-    def source_text(certificate: Certificate) -> str:
+    def source_text(certificate: CertificateProduct) -> str:
         """Формирует текст, кодируемый для сертификата.
 
-        К наименованию добавляется бренд: он часто является единственным
-        различающим признаком между похожими позициями.
-
         Args:
-            certificate: Сертификат.
+            certificate: Товарная позиция базы сертификатов.
 
         Returns:
             Текст для кодирования.
         """
-        parts = [certificate.product_name]
-        if certificate.brand:
-            parts.append(certificate.brand)
-        return normalize(" ".join(part for part in parts if part))
+        return normalize(certificate.product_name)
 
     def build(
         self,
-        certificates: Sequence[Certificate],
+        certificates: Sequence[CertificateProduct],
         *,
         reporter: ProgressReporter | None = None,
         force: bool = False,

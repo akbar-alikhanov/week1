@@ -61,7 +61,7 @@ class SettingsView(BaseView):
         self._scroll.pack(fill="both", expand=True)
 
         self._build_matching_section()
-        self._build_indexing_section()
+        self._build_certificates_section()
         self._build_export_section()
         self._build_interface_section()
         self._build_maintenance_section()
@@ -256,57 +256,55 @@ class SettingsView(BaseView):
                 title="Семантический поиск недоступен",
             )
 
-    # ---------------------------------------------------------- индексация
-    def _build_indexing_section(self) -> None:
-        """Создаёт группу настроек индексации."""
+    # ------------------------------------------------------ база сертификатов
+    def _build_certificates_section(self) -> None:
+        """Создаёт группу настроек источника данных о сертификатах."""
         card = self._card(
-            "Индексация справочника",
-            "Как программа читает папку с сертификатами",
+            "База сертификатов",
+            "Excel — единственный источник данных; PDF используются только для копирования",
             "database",
         )
-        indexing = self._settings.indexing
+        certificates = self._settings.certificates
 
-        self._switch_row(
+        self._path_row(
             card.content,
-            "Следить за папкой",
-            "Новые PDF индексируются автоматически, без нажатия кнопок",
-            indexing.watch_enabled,
-            lambda value: self._set("indexing", "watch_enabled", value),
+            "Файл базы сертификатов",
+            "Excel: порядковый номер, наименование, срок годности, номер сертификата",
+            certificates.excel_path,
+            lambda value: self._set("certificates", "excel_path", value),
+            file_mode=True,
+        )
+        self._path_row(
+            card.content,
+            "Папка с PDF-файлами",
+            "Используется только для копирования найденного сертификата в результат",
+            certificates.pdf_dir,
+            lambda value: self._set("certificates", "pdf_dir", value),
         )
         self._switch_row(
             card.content,
             "Проверять изменения при запуске",
-            "Сравнение по размеру, дате и хэшу — читаются только изменённые файлы",
-            indexing.rescan_on_start,
-            lambda value: self._set("indexing", "rescan_on_start", value),
+            "Если Excel-файл изменился со времени последнего импорта — переимпортировать его",
+            certificates.rescan_on_start,
+            lambda value: self._set("certificates", "rescan_on_start", value),
         )
         self._switch_row(
             card.content,
-            "Обходить вложенные папки",
-            "Учитывать сертификаты в подпапках",
-            indexing.recursive,
-            lambda value: self._set("indexing", "recursive", value),
+            "Искать PDF во вложенных папках",
+            "Учитывать сертификаты в подпапках при поиске по номеру",
+            certificates.recursive_pdf_search,
+            lambda value: self._set("certificates", "recursive_pdf_search", value),
         )
-        self._slider_row(
-            card.content,
-            "Потоков индексации",
-            "0 — определять автоматически по числу ядер процессора",
-            float(indexing.max_workers),
-            0.0,
-            32.0,
-            lambda value: self._set("indexing", "max_workers", int(value)),
-            fmt=lambda value: "авто" if int(value) == 0 else f"{int(value)}",
-        )
-        self._slider_row(
-            card.content,
-            "Страниц PDF для разбора",
-            "Таблица товарных позиций может занимать десятки страниц",
-            float(indexing.max_pages),
-            1.0,
-            500.0,
-            lambda value: self._set("indexing", "max_pages", int(value)),
-            fmt=lambda value: f"{int(value)}",
-        )
+
+        buttons = ctk.CTkFrame(card.content, fg_color="transparent", width=0, height=0)
+        buttons.pack(fill="x", pady=(Spacing.SM, 0))
+        secondary_button(
+            buttons,
+            self.theme,
+            text="Импортировать заново",
+            icon="refresh",
+            command=lambda: self.app.navigate("dashboard", action="reimport"),
+        ).pack(side="left")
 
     # -------------------------------------------------------------- результат
     def _build_export_section(self) -> None:
@@ -513,13 +511,6 @@ class SettingsView(BaseView):
         secondary_button(
             buttons, self.theme, text="Восстановить", icon="upload", command=self._restore
         ).pack(side="left", padx=(Spacing.SM, 0))
-        secondary_button(
-            buttons,
-            self.theme,
-            text="Полная переиндексация",
-            icon="refresh",
-            command=self._full_reindex,
-        ).pack(side="left", padx=(Spacing.SM, 0))
         ghost_button(
             buttons, self.theme, text="Очистить кэш", icon="trash", command=self._clear_cache
         ).pack(side="right")
@@ -587,19 +578,6 @@ class SettingsView(BaseView):
             self.app.show_error("Восстановление не выполнено", str(error))
             return
         self.app.toasts.success("База восстановлена. Перезапустите программу.")
-
-    def _full_reindex(self) -> None:
-        """Запускает полную переиндексацию справочника."""
-        if not ask_confirmation(
-            self.app,
-            self.theme,
-            title="Полная переиндексация",
-            message="Прочитать заново все PDF-файлы?",
-            detail="Операция может занять несколько минут. Соответствия сохранятся.",
-            confirm_text="Переиндексировать",
-        ):
-            return
-        self.app.navigate("dashboard", action="reindex_force")
 
     def _clear_cache(self) -> None:
         """Очищает кэш и векторный индекс."""
@@ -793,15 +771,31 @@ class SettingsView(BaseView):
         description: str,
         value: str,
         on_change: Callable[[str], None],
+        *,
+        file_mode: bool = False,
     ) -> None:
-        """Создаёт строку выбора каталога."""
+        """Создаёт строку выбора каталога или файла.
+
+        Args:
+            master: Родительский виджет.
+            title: Заголовок строки (также заголовок системного диалога).
+            description: Пояснение под заголовком.
+            value: Текущее значение пути.
+            on_change: Обработчик изменения значения.
+            file_mode: Выбирать файл вместо каталога.
+        """
         row = self._row(master, title, description)
         variable = ctk.StringVar(value=value)
 
         def _browse() -> None:
             from tkinter import filedialog
 
-            selected = filedialog.askdirectory(title=title)
+            if file_mode:
+                selected = filedialog.askopenfilename(
+                    title=title, filetypes=[("Excel", "*.xlsx *.xlsm"), ("Все файлы", "*.*")]
+                )
+            else:
+                selected = filedialog.askdirectory(title=title)
             if selected:
                 variable.set(selected)
                 on_change(selected)

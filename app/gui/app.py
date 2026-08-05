@@ -171,7 +171,7 @@ class ApplicationWindow(ctk.CTk):
         """
         guarded: dict[str, Callable[[], None]] = {
             "<Control-o>": lambda: self._dashboard().browse_order(),
-            "<Control-d>": lambda: self._dashboard().browse_certificates(),
+            "<Control-d>": lambda: self._dashboard().browse_database(),
             "<Control-Return>": lambda: self._dashboard().run_processing(),
             "<Control-f>": self.focus_search,
             "<Control-t>": self.toggle_theme,
@@ -183,7 +183,7 @@ class ApplicationWindow(ctk.CTk):
             self.bind_all(sequence, lambda _, action=handler: _guarded_call(self, action))
 
         unguarded: dict[str, Callable[[], None]] = {
-            "<F5>": lambda: self._dashboard().reindex(),
+            "<F5>": lambda: self._dashboard().reimport(),
             "<F1>": self.show_shortcuts,
             "<Escape>": self._handle_escape,
         }
@@ -203,20 +203,26 @@ class ApplicationWindow(ctk.CTk):
             return
 
         def _on_drop(paths: list[Path]) -> None:
-            order = next(
-                (
-                    path
-                    for path in paths
-                    if path.is_file() and path.suffix.lower() in EXCEL_EXTENSIONS
-                ),
-                None,
-            )
+            excel_files = [
+                path for path in paths if path.is_file() and path.suffix.lower() in EXCEL_EXTENSIONS
+            ]
             directory = next((path for path in paths if path.is_dir()), None)
-            if order is None and directory is None:
-                self.toasts.warning("Перетащите файл заказа (.xlsx) или папку с сертификатами")
+            if not excel_files and directory is None:
+                self.toasts.warning(
+                    "Перетащите файл заказа или базы сертификатов (.xlsx), либо папку с PDF"
+                )
                 return
+
             self.navigate("dashboard")
-            self._dashboard().set_paths(order=order, certificates=directory)
+            order = excel_files[0] if excel_files else None
+            database = excel_files[1] if len(excel_files) > 1 else None
+            self._dashboard().set_paths(order=order, database=database)
+
+            if directory is not None:
+                self.settings_service.update(
+                    lambda settings: setattr(settings.certificates, "pdf_dir", str(directory))
+                )
+                self.toasts.info(f"Папка PDF-сертификатов обновлена: {directory}")
 
         dnd.register_drop_target(self, _on_drop)
 
@@ -252,10 +258,8 @@ class ApplicationWindow(ctk.CTk):
         self.sidebar.set_active(key)
         self._animate_view_in(view)
 
-        if action == "reindex":
-            self._dashboard().reindex()
-        elif action == "reindex_force":
-            self._dashboard().reindex(force=True)
+        if action == "reimport":
+            self._dashboard().reimport()
 
     def rebuild_view(self, key: str) -> None:
         """Пересоздаёт раздел (после сброса настроек).
@@ -397,14 +401,19 @@ class ApplicationWindow(ctk.CTk):
         except Exception:
             self.toasts.warning("Не удалось открыть объект средствами системы")
 
-    def preview_pdf(self, path: Path) -> None:
-        """Показывает сертификат во встроенном просмотрщике.
+    def preview_pdf(self, certificate_number: str) -> None:
+        """Находит PDF сертификата по номеру и показывает его во встроенном просмотрщике.
 
         Args:
-            path: Путь к PDF-файлу.
+            certificate_number: Номер сертификата.
         """
-        if not path.exists():
-            self.toasts.warning(f"Файл сертификата не найден: {path.name}")
+        from app.services.certificate_file_locator import find_pdf
+
+        certificates = self.settings.certificates
+        directory = Path(certificates.pdf_dir) if certificates.pdf_dir else None
+        path = find_pdf(directory, certificate_number, recursive=certificates.recursive_pdf_search)
+        if path is None:
+            self.toasts.warning(f"PDF-файл сертификата {certificate_number} не найден")
             return
         self.navigate("certificates")
         view = self._views.get("certificates")
@@ -433,11 +442,11 @@ class ApplicationWindow(ctk.CTk):
     def _update_sidebar_status(self) -> None:
         """Обновляет строку состояния боковой панели."""
         try:
-            indexed = self.container.indexing_service.last_indexed_at()
-            count = self.container.certificate_repository.count("is_active = 1")
+            imported = self.container.certificate_import_service.last_imported_at()
+            count = self.container.certificate_repository.count()
             text = f"Сертификатов: {count}"
-            if indexed:
-                text += f"\nОбновлено: {indexed}"
+            if imported:
+                text += f"\nИмпортировано: {imported}"
             self.sidebar.set_status(text)
         except Exception:
             pass
@@ -452,57 +461,30 @@ class ApplicationWindow(ctk.CTk):
             if path.exists():
                 self._dashboard().set_paths(order=path)
 
-        if self.container.indexing_service.needs_initial_scan():
-            self._offer_initial_scan()
-        elif settings.indexing.rescan_on_start:
-            directory = self.container.indexing_service.last_directory()
-            if directory and Path(directory).is_dir():
-                self._dashboard().reindex(silent=True)
+        excel_path = settings.certificates.excel_path
+        if excel_path and Path(excel_path).is_file():
+            import_service = self.container.certificate_import_service
+            if self.container.certificate_repository.count() == 0:
+                self._dashboard().reimport()
+            elif settings.certificates.rescan_on_start and import_service.needs_reimport(
+                Path(excel_path)
+            ):
+                self._dashboard().reimport(silent=True)
+        else:
+            self._offer_initial_import()
 
-        if self.container.start_watcher():
-            _LOGGER.info("Наблюдение за папкой сертификатов активно")
-
-        self.container.events.subscribe("index.auto_updated", self._on_auto_index)
         self._update_sidebar_status()
 
-    def _offer_initial_scan(self) -> None:
-        """Предлагает выполнить первичное сканирование справочника."""
-        stored = self.container.indexing_service.last_directory()
-        if stored and Path(stored).is_dir():
-            self._dashboard().reindex()
-            return
-
+    def _offer_initial_import(self) -> None:
+        """Предлагает выбрать файл базы сертификатов при первом запуске."""
         self.toasts.info(
-            "Укажите папку с PDF-сертификатами — программа прочитает их один раз "
-            "и дальше будет обновлять только новые файлы.",
+            "Укажите файл базы сертификатов (Excel) — программа проиндексирует его "
+            "и будет использовать как единственный источник данных.",
             title="Первый запуск",
             duration=12.0,
-            action_text="Выбрать папку",
-            on_action=lambda: self._dashboard().browse_certificates(),
+            action_text="Выбрать файл",
+            on_action=lambda: self._dashboard().browse_database(),
         )
-
-    def _on_auto_index(self, indexed: int = 0, removed: int = 0, **_: Any) -> None:
-        """Реагирует на автоматическое обновление справочника."""
-
-        def _notify() -> None:
-            parts = []
-            if indexed:
-                parts.append(f"добавлено {indexed}")
-            if removed:
-                parts.append(f"удалено {removed}")
-            if parts:
-                self.toasts.info(
-                    "Справочник обновлён: " + ", ".join(parts), title="Папка сертификатов"
-                )
-            self._update_sidebar_status()
-            dashboard = self._views.get("dashboard")
-            if dashboard is not None:
-                dashboard.refresh()
-
-        try:
-            self.after(0, _notify)
-        except Exception:
-            pass
 
     # ------------------------------------------------------------- завершение
     def on_close(self) -> None:

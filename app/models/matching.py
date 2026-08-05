@@ -14,7 +14,7 @@ from app.core.constants import (
     STATUS_NOT_FOUND,
     STATUS_SKIPPED,
 )
-from app.models.certificate import Certificate
+from app.models.certificate_product import CertificateProduct
 from app.models.order import OrderRow
 
 
@@ -120,13 +120,13 @@ class MatchCandidate:
     """Кандидат на роль сертификата для строки заказа.
 
     Attributes:
-        certificate: Сертификат-кандидат.
+        certificate: Товарная позиция базы сертификатов — кандидат.
         score: Детализация оценки.
         source: Этап, на котором кандидат был найден.
         rank: Позиция в отсортированном списке (0 — лучший).
     """
 
-    certificate: Certificate
+    certificate: CertificateProduct
     score: ScoreBreakdown
     source: MatchSource
     rank: int = 0
@@ -174,8 +174,8 @@ class MatchResult:
         return None
 
     @property
-    def certificate(self) -> Certificate | None:
-        """Сертификат выбранного кандидата."""
+    def certificate(self) -> CertificateProduct | None:
+        """Товарная позиция базы сертификатов, выбранная для строки заказа."""
         candidate = self.selected
         return candidate.certificate if candidate else None
 
@@ -234,7 +234,6 @@ class MatchResult:
             "Сертификат": certificate.display_number if certificate else "",
             "Срок сертификата": certificate.expiry_date if certificate else None,
             "Товар в сертификате": certificate.product_name if certificate else "",
-            "Файл": certificate.pdf_name if certificate else "",
             "Совпадение, %": candidate.percent if candidate else 0,
             "Метод": candidate.source.label if candidate else "",
             "Детализация": candidate.score.explain() if candidate else "",

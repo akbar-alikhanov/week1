@@ -371,6 +371,157 @@ def _migration_003_multi_row_certificates(connection: sqlite3.Connection) -> Non
     rebuild_fts(connection)
 
 
+#: Переход на Excel как единственный источник данных о сертификатах (версия 4).
+#:
+#: PDF больше не читаются и не разбираются: программа только копирует их по
+#: имени файла после того, как подходящий сертификат найден в этой таблице.
+#: SQLite здесь выполняет роль быстрого индекса над Excel-базой, поэтому
+#: набор колонок — ровно то, что содержит исходная таблица (плюс служебный
+#: ``id``): ``product_name``, ``normalized_name``, ``volume_ml``,
+#: ``expiry_date``, ``certificate_number``, ``source_row``. Производные поля
+#: для нечёткого/семантического поиска (транслитерация, буквенная сигнатура)
+#: вычисляются в Python при загрузке строки и не хранятся в базе — они не
+#: участвуют ни в одном SQL-запросе, только в сравнении объектов в памяти.
+_SCHEMA_V4: Final[str] = """
+CREATE TABLE certificate_products (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_name        TEXT    NOT NULL,
+    normalized_name     TEXT    NOT NULL DEFAULT '',
+    volume_ml           REAL,
+    expiry_date         TEXT,
+    certificate_number  TEXT    NOT NULL DEFAULT '',
+    source_row          INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX idx_certificate_products_normalized ON certificate_products (normalized_name);
+CREATE INDEX idx_certificate_products_lookup ON certificate_products (normalized_name, volume_ml);
+CREATE INDEX idx_certificate_products_number ON certificate_products (certificate_number);
+CREATE INDEX idx_certificate_products_expiry ON certificate_products (expiry_date);
+
+-- Псевдонимы: словарь товар → (русское наименование, объём). Больше не
+-- привязан к конкретной записи сертификата (certificate_id) — это плоское
+-- соответствие "как называется у поставщика" → "как называется в базе
+-- сертификатов", а строгий поиск по (normalized_name, volume_ml) выполняется
+-- заново при каждом подборе, поэтому связь всегда свежая.
+CREATE TABLE aliases_v4 (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_text       TEXT    NOT NULL,
+    normalized_source TEXT    NOT NULL,
+    token_source      TEXT    NOT NULL DEFAULT '',
+    target_name       TEXT    NOT NULL DEFAULT '',
+    brand             TEXT    NOT NULL DEFAULT '',
+    volume_ml         REAL,
+    weight            REAL    NOT NULL DEFAULT 1.0,
+    hit_count         INTEGER NOT NULL DEFAULT 0,
+    is_manual         INTEGER NOT NULL DEFAULT 1,
+    created_at        TEXT    NOT NULL,
+    updated_at        TEXT    NOT NULL,
+    last_used_at      TEXT,
+    created_by        TEXT    NOT NULL DEFAULT '',
+    note              TEXT    NOT NULL DEFAULT '',
+    UNIQUE (normalized_source)
+);
+
+-- Из дублирующихся по normalized_source строк переносится только последняя
+-- изменённая — уникальность теперь однопольная (было: источник+сертификат).
+INSERT INTO aliases_v4 (
+    id, source_text, normalized_source, token_source, target_name, brand,
+    volume_ml, weight, hit_count, is_manual, created_at, updated_at,
+    last_used_at, created_by, note
+)
+SELECT
+    id, source_text, normalized_source, token_source, target_name, brand,
+    CASE WHEN volume_unit = 'ml' THEN volume_value ELSE NULL END,
+    weight, hit_count, is_manual, created_at, updated_at,
+    last_used_at, created_by, note
+FROM aliases
+WHERE id IN (
+    SELECT a1.id FROM aliases a1
+    WHERE a1.updated_at = (
+        SELECT MAX(a2.updated_at) FROM aliases a2
+        WHERE a2.normalized_source = a1.normalized_source
+    )
+    GROUP BY a1.normalized_source
+);
+
+DROP TABLE aliases;
+ALTER TABLE aliases_v4 RENAME TO aliases;
+
+CREATE INDEX idx_aliases_normalized ON aliases (normalized_source);
+CREATE INDEX idx_aliases_token      ON aliases (token_source);
+CREATE INDEX idx_aliases_brand      ON aliases (brand);
+
+-- Справочник товаров: последний подобранный сертификат теперь ссылается на
+-- новую таблицу. Старые идентификаторы бессмысленны после смены источника
+-- данных, поэтому ссылка сбрасывается, а не переносится.
+CREATE TABLE products_v4 (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    name                TEXT    NOT NULL,
+    normalized_name     TEXT    NOT NULL UNIQUE,
+    translit_name       TEXT    NOT NULL DEFAULT '',
+    name_signature      TEXT    NOT NULL DEFAULT '',
+    brand               TEXT    NOT NULL DEFAULT '',
+    volume_value        REAL,
+    volume_unit         TEXT    NOT NULL DEFAULT '',
+    last_certificate_id INTEGER REFERENCES certificate_products (id) ON DELETE SET NULL,
+    seen_count          INTEGER NOT NULL DEFAULT 0,
+    matched_count       INTEGER NOT NULL DEFAULT 0,
+    first_seen_at       TEXT    NOT NULL,
+    last_seen_at        TEXT    NOT NULL
+);
+
+INSERT INTO products_v4 (
+    id, name, normalized_name, translit_name, name_signature, brand,
+    volume_value, volume_unit, last_certificate_id, seen_count, matched_count,
+    first_seen_at, last_seen_at
+)
+SELECT
+    id, name, normalized_name, translit_name, name_signature, brand,
+    volume_value, volume_unit, NULL, seen_count, matched_count,
+    first_seen_at, last_seen_at
+FROM products;
+
+DROP TABLE products;
+ALTER TABLE products_v4 RENAME TO products;
+
+CREATE INDEX idx_products_signature ON products (name_signature);
+
+-- Кэш векторных представлений — производные данные, пересчитываются заново
+-- при первом семантическом поиске после переиндексации/переимпорта.
+DROP TABLE IF EXISTS embeddings;
+CREATE TABLE embeddings (
+    certificate_id INTEGER NOT NULL REFERENCES certificate_products (id) ON DELETE CASCADE,
+    model          TEXT    NOT NULL,
+    dimension      INTEGER NOT NULL,
+    vector         BLOB    NOT NULL,
+    source_hash    TEXT    NOT NULL DEFAULT '',
+    created_at     TEXT    NOT NULL,
+    PRIMARY KEY (certificate_id, model)
+);
+
+DROP TABLE IF EXISTS certificates_fts;
+DROP TABLE certificates;
+"""
+
+
+def _migration_004_excel_source(connection: sqlite3.Connection) -> None:
+    """Переводит базу на Excel как единственный источник данных о сертификатах.
+
+    Таблица ``certificates`` (справочник, извлечённый из PDF) и её
+    полнотекстовый индекс удаляются вместе с зависимой от PDF частью схемы
+    псевдонимов; на смену приходит ``certificate_products`` — индекс поверх
+    Excel-базы сертификатов. FTS5-триггеры уничтожаются вместе с
+    ``certificates`` автоматически (``DROP TABLE``), новых не создаётся:
+    полнотекстовый поиск по ``certificate_products`` не нужен — единственный
+    предусмотренный алгоритмом путь поиска, кроме строгого совпадения по
+    словарю, использует нечёткое/семантическое сравнение в памяти.
+
+    Args:
+        connection: Открытое соединение SQLite.
+    """
+    connection.executescript(_SCHEMA_V4)
+
+
 def _try_create_fts(connection: sqlite3.Connection) -> None:
     """Создаёт полнотекстовый индекс, если сборка SQLite поддерживает FTS5.
 
@@ -391,6 +542,7 @@ MIGRATIONS: Final[dict[int, Callable[[sqlite3.Connection], None]]] = {
     1: _migration_001_initial,
     2: _migration_002_alias_manager,
     3: _migration_003_multi_row_certificates,
+    4: _migration_004_excel_source,
 }
 
 #: Целевая версия схемы.

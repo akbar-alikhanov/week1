@@ -18,7 +18,7 @@ from datetime import date
 from app.config.settings import MatchingSettings
 from app.core.dates import expiry_similarity
 from app.core.units import Volume, extract_volumes, volume_similarity
-from app.models.certificate import Certificate
+from app.models.certificate_product import CertificateProduct
 from app.models.matching import ScoreBreakdown
 from app.models.order import OrderRow
 
@@ -87,7 +87,7 @@ def combine_name_score(lexical: float, semantic: float | None, settings: Matchin
 
 def score_candidate(
     row: OrderRow,
-    certificate: Certificate,
+    certificate: CertificateProduct,
     *,
     lexical: float,
     semantic: float | None,
@@ -139,7 +139,9 @@ def score_candidate(
     )
 
 
-def is_hard_mismatch(row: OrderRow, certificate: Certificate, context: ScoringContext) -> bool:
+def is_hard_mismatch(
+    row: OrderRow, certificate: CertificateProduct, context: ScoringContext
+) -> bool:
     """Проверяет наличие безусловного несоответствия.
 
     Некоторые расхождения не компенсируются никакими весами: сертификат с
@@ -190,7 +192,7 @@ def is_hard_mismatch(row: OrderRow, certificate: Certificate, context: ScoringCo
     return False
 
 
-def _covers_volume(certificate: Certificate, target: Volume, tolerance: float) -> bool:
+def _covers_volume(certificate: CertificateProduct, target: Volume, tolerance: float) -> bool:
     """Проверяет, покрывает ли сертификат требуемый объём.
 
     Args:

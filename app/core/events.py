@@ -277,10 +277,8 @@ class ProgressReporter:
 class AppEvent:
     """Имена доменных событий приложения."""
 
-    INDEX_STARTED: Final[str] = "index.started"
-    INDEX_PROGRESS: Final[str] = "index.progress"
-    INDEX_FINISHED: Final[str] = "index.finished"
-    INDEX_FILE_ADDED: Final[str] = "index.file_added"
+    CERTIFICATES_IMPORT_STARTED: Final[str] = "certificates_import.started"
+    CERTIFICATES_IMPORT_FINISHED: Final[str] = "certificates_import.finished"
     ORDER_STARTED: Final[str] = "order.started"
     ORDER_FINISHED: Final[str] = "order.finished"
     ALIAS_CREATED: Final[str] = "alias.created"

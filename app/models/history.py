@@ -203,52 +203,36 @@ class ProcessingRun:
 
 
 @dataclass(slots=True)
-class IndexingResult:
-    """Итог сканирования папки сертификатов.
+class ImportResult:
+    """Итог импорта Excel-базы сертификатов в SQLite.
 
     Attributes:
-        scanned: Всего просмотрено файлов.
-        added: Проиндексировано новых.
-        updated: Переиндексировано изменённых.
-        skipped: Пропущено без изменений.
-        removed: Помечено отсутствующими.
-        failed: Не удалось прочитать.
+        total_rows: Всего прочитано строк с данными.
+        imported: Сохранено строк в базе.
+        skipped_rows: Пропущено пустых или нераспознанных строк.
         duration_ms: Длительность операции.
-        errors: Пары «файл → сообщение об ошибке».
-        cancelled: Признак отмены пользователем.
+        error: Сообщение об ошибке, если импорт не выполнен (пусто — успех).
     """
 
-    scanned: int = 0
-    added: int = 0
-    updated: int = 0
-    skipped: int = 0
-    removed: int = 0
-    failed: int = 0
+    total_rows: int = 0
+    imported: int = 0
+    skipped_rows: int = 0
     duration_ms: float = 0.0
-    errors: list[tuple[str, str]] = field(default_factory=list)
-    cancelled: bool = False
+    error: str = ""
 
     @property
-    def changed(self) -> int:
-        """Количество фактически изменённых записей."""
-        return self.added + self.updated + self.removed
+    def failed(self) -> bool:
+        """Признак того, что импорт завершился ошибкой."""
+        return bool(self.error)
 
     def summary(self) -> str:
         """Возвращает однострочную сводку для уведомления и журнала."""
-        if self.cancelled:
-            return f"Индексация прервана: обработано {self.scanned} файлов"
-        parts = [f"просмотрено {self.scanned}"]
-        if self.added:
-            parts.append(f"добавлено {self.added}")
-        if self.updated:
-            parts.append(f"обновлено {self.updated}")
-        if self.removed:
-            parts.append(f"удалено {self.removed}")
-        if self.failed:
-            parts.append(f"ошибок {self.failed}")
-        if not self.changed and not self.failed:
-            parts.append("изменений нет")
-        return "Индексация: " + ", ".join(parts)
+        if self.error:
+            return f"Импорт базы сертификатов не выполнен: {self.error}"
+        parts = [f"импортировано {self.imported}"]
+        if self.skipped_rows:
+            parts.append(f"пропущено строк {self.skipped_rows}")
+        return "База сертификатов обновлена: " + ", ".join(parts)
 
 
 def _parse(value: Any) -> datetime:

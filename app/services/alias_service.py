@@ -20,12 +20,13 @@ from pathlib import Path
 from app.core.events import AppEvent, EventBus
 from app.core.exceptions import DuplicateAliasError
 from app.core.paths import AppPaths
+from app.core.text import normalize
 from app.models.alias import Alias
 from app.models.alias_audit import AliasAuditEntry
-from app.models.certificate import Certificate
+from app.models.certificate_product import CertificateProduct
 from app.models.matching import MatchResult
 from app.repositories.alias_repository import AliasRepository
-from app.repositories.certificate_repository import CertificateRepository
+from app.repositories.certificate_product_repository import CertificateProductRepository
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -52,7 +53,7 @@ class AliasService:
     def __init__(
         self,
         alias_repository: AliasRepository,
-        certificate_repository: CertificateRepository,
+        certificate_repository: CertificateProductRepository,
         event_bus: EventBus,
         paths: AppPaths | None = None,
     ) -> None:
@@ -60,7 +61,8 @@ class AliasService:
 
         Args:
             alias_repository: Хранилище псевдонимов.
-            certificate_repository: Справочник сертификатов.
+            certificate_repository: База сертификатов (для подсказок и
+                проверки текущих соответствий).
             event_bus: Шина событий приложения.
             paths: Пути приложения (для резервных копий словаря).
         """
@@ -71,36 +73,31 @@ class AliasService:
 
     # --------------------------------------------------------- самообучение
     def learn(
-        self, source_text: str, certificate: Certificate, *, note: str = "", weight: float = 1.0
+        self,
+        source_text: str,
+        certificate: CertificateProduct,
+        *,
+        note: str = "",
+        weight: float = 1.0,
     ) -> Alias:
-        """Запоминает соответствие «наименование → сертификат».
+        """Запоминает соответствие «наименование → товар».
 
         Используется окном неоднозначного выбора: решение пользователя
         должно быть учтено раньше любых алгоритмов при следующей обработке.
 
         Args:
             source_text: Наименование из заказа, как его видел пользователь.
-            certificate: Сертификат, выбранный пользователем.
+            certificate: Позиция базы сертификатов, выбранная пользователем.
             note: Комментарий.
             weight: Приоритет псевдонима при конфликтах.
 
         Returns:
             Сохранённый псевдоним.
-
-        Raises:
-            ValueError: Если сертификат не сохранён в базе.
         """
-        if certificate.id is None:
-            raise ValueError("Невозможно создать псевдоним для несохранённого сертификата")
-
         alias = Alias(
             source_text=source_text.strip(),
-            certificate_id=certificate.id,
             target_name=certificate.product_name,
-            target_pdf_name=certificate.pdf_name,
-            brand=certificate.brand,
-            volume_value=certificate.volume_value,
-            volume_unit=certificate.volume_unit,
+            volume_ml=certificate.volume_ml,
             weight=weight,
             note=note,
             is_manual=True,
@@ -149,11 +146,10 @@ class AliasService:
     def add(
         self,
         source_text: str,
-        certificate: Certificate,
+        target_name: str,
         *,
         brand: str = "",
-        volume_value: float | None = None,
-        volume_unit: str = "",
+        volume_ml: float | None = None,
         note: str = "",
     ) -> Alias:
         """Добавляет новую запись словаря вручную (окно «Добавить соответствие»).
@@ -164,30 +160,22 @@ class AliasService:
 
         Args:
             source_text: Системное наименование (как в заказе).
-            certificate: Сертификат, к которому привязывается запись.
-            brand: Бренд (пусто — взять из сертификата).
-            volume_value: Значение объёма (``None`` — взять из сертификата).
-            volume_unit: Единица объёма.
+            target_name: Русское наименование товара (как в базе сертификатов).
+            brand: Бренд (произвольная заметка).
+            volume_ml: Объём товара.
             note: Комментарий.
 
         Returns:
             Созданная запись.
 
         Raises:
-            ValueError: Если сертификат не сохранён в базе.
             DuplicateAliasError: Если точно такая же запись уже существует.
         """
-        if certificate.id is None:
-            raise ValueError("Невозможно создать псевдоним для несохранённого сертификата")
-
         alias = Alias(
             source_text=source_text.strip(),
-            certificate_id=certificate.id,
-            target_name=certificate.product_name,
-            target_pdf_name=certificate.pdf_name,
-            brand=brand or certificate.brand,
-            volume_value=volume_value if volume_value is not None else certificate.volume_value,
-            volume_unit=volume_unit or certificate.volume_unit,
+            target_name=target_name.strip(),
+            brand=brand,
+            volume_ml=volume_ml,
             note=note,
             is_manual=True,
         )
@@ -197,10 +185,6 @@ class AliasService:
 
     def update(self, alias_id: int, **changes: object) -> Alias:
         """Изменяет существующую запись словаря.
-
-        Если среди изменений есть новый ``certificate_id``, попутно
-        подтягивается актуальное имя PDF-файла — иначе связь с сертификатом
-        и его имя для отображения могли бы разойтись.
 
         Args:
             alias_id: Идентификатор записи.
@@ -213,12 +197,6 @@ class AliasService:
             DuplicateAliasError: Если запись не найдена или конфликтует
                 с другой существующей записью.
         """
-        certificate_id = changes.get("certificate_id")
-        if isinstance(certificate_id, int):
-            certificate = self._certificates.get_by_id(certificate_id)
-            if certificate is not None:
-                changes.setdefault("target_pdf_name", certificate.pdf_name)
-
         updated = self._aliases.update(alias_id, **changes)
         self._events.publish(AppEvent.DATABASE_CHANGED, reason="alias_updated")
         return updated
@@ -340,8 +318,7 @@ class AliasService:
         query: str = "",
         *,
         brand: str = "",
-        volume_value: float | None = None,
-        volume_unit: str = "",
+        volume_ml: float | None = None,
         sort: str = "updated_desc",
         limit: int = 500,
         offset: int = 0,
@@ -351,8 +328,7 @@ class AliasService:
         Args:
             query: Текст поиска.
             brand: Точное значение бренда.
-            volume_value: Значение объёма для фильтра.
-            volume_unit: Единица объёма.
+            volume_ml: Значение объёма для фильтра.
             sort: Ключ сортировки.
             limit: Максимум записей.
             offset: Смещение для постраничной загрузки.
@@ -361,37 +337,23 @@ class AliasService:
             Найденные записи.
         """
         return self._aliases.search(
-            query,
-            brand=brand,
-            volume_value=volume_value,
-            volume_unit=volume_unit,
-            sort=sort,
-            limit=limit,
-            offset=offset,
+            query, brand=brand, volume_ml=volume_ml, sort=sort, limit=limit, offset=offset
         )
 
     def count_search(
-        self,
-        query: str = "",
-        *,
-        brand: str = "",
-        volume_value: float | None = None,
-        volume_unit: str = "",
+        self, query: str = "", *, brand: str = "", volume_ml: float | None = None
     ) -> int:
         """Возвращает общее количество записей, подходящих под фильтр.
 
         Args:
             query: Текст поиска.
             brand: Точное значение бренда.
-            volume_value: Значение объёма.
-            volume_unit: Единица объёма.
+            volume_ml: Значение объёма.
 
         Returns:
             Количество подходящих записей.
         """
-        return self._aliases.count_search(
-            query, brand=brand, volume_value=volume_value, volume_unit=volume_unit
-        )
+        return self._aliases.count_search(query, brand=brand, volume_ml=volume_ml)
 
     def list_brands(self) -> list[str]:
         """Возвращает список брендов для выпадающего фильтра.
@@ -401,45 +363,36 @@ class AliasService:
         """
         return self._aliases.list_brands()
 
-    def list_volumes(self) -> list[tuple[float, str]]:
+    def list_volumes(self) -> list[float]:
         """Возвращает список объёмов для выпадающего фильтра.
 
         Returns:
-            Пары ``(значение, единица)``.
+            Значения объёма.
         """
         return self._aliases.list_volumes()
 
-    def resolve_certificate(self, alias: Alias) -> Certificate | None:
-        """Возвращает сертификат, на который ссылается псевдоним.
+    def find_related_certificates(
+        self, alias: Alias, *, limit: int = 8
+    ) -> list[CertificateProduct]:
+        """Возвращает позиции базы, на которые сейчас разрешается запись.
 
-        Args:
-            alias: Псевдоним.
-
-        Returns:
-            Сертификат либо ``None``, если связь потеряна.
-        """
-        if alias.certificate_id is None:
-            return None
-        return self._certificates.get_by_id(alias.certificate_id)
-
-    def find_related_certificates(self, alias: Alias, *, limit: int = 8) -> list[Certificate]:
-        """Ищет сертификаты с похожим наименованием (для панели предпросмотра).
-
-        Помогает увидеть все фасовки/варианты товара, а не только тот, что
-        привязан к записи — полезно, если привязку нужно исправить.
+        Показывает не абстрактно похожие товары, а именно то, что найдёт
+        строгий поиск алгоритма подбора прямо сейчас: ``normalized_name`` +
+        ``volume_ml`` записи словаря. Это самый честный предпросмотр того,
+        что произойдёт при следующей обработке заказа.
 
         Args:
             alias: Псевдоним.
             limit: Максимум результатов.
 
         Returns:
-            Похожие сертификаты (без учёта уже привязанного), максимум ``limit``.
+            Подходящие позиции базы сертификатов, максимум ``limit``.
         """
-        query = alias.target_name or alias.source_text
-        if not query.strip():
+        normalized = normalize(alias.target_name)
+        if not normalized:
             return []
-        found = self._certificates.search(query, limit=limit + 1, include_inactive=False)
-        return [item for item in found if item.id != alias.certificate_id][:limit]
+        found = self._certificates.find_strict(normalized, alias.volume_ml)
+        return found[:limit]
 
     def count(self) -> int:
         """Возвращает количество сохранённых псевдонимов.
@@ -473,14 +426,6 @@ class AliasService:
         result = self._aliases.import_from_file(source)
         self._events.publish(AppEvent.DATABASE_CHANGED, reason="aliases_imported")
         return result
-
-    def repair(self) -> int:
-        """Восстанавливает связи псевдонимов после переиндексации.
-
-        Returns:
-            Количество восстановленных связей.
-        """
-        return self._aliases.repair_links()
 
     # --------------------------------------------------------------- бэкапы
     @property

@@ -1,17 +1,12 @@
-"""Парсеры внешних форматов: PDF-сертификаты и Excel-заказы."""
+"""Парсеры внешних форматов: Excel-заказы и Excel-база сертификатов."""
 
 from app.parsers.column_mapper import ColumnMapping, detect_mapping
 from app.parsers.excel_order_parser import ExcelOrderParser
-from app.parsers.field_extractors import ExtractedFields, extract_all
-from app.parsers.pdf_parser import PdfDocumentInfo, PdfParser, compute_file_hash
+from app.parsers.pdf_parser import PdfParser
 
 __all__ = [
     "ColumnMapping",
     "ExcelOrderParser",
-    "ExtractedFields",
-    "PdfDocumentInfo",
     "PdfParser",
-    "compute_file_hash",
     "detect_mapping",
-    "extract_all",
 ]

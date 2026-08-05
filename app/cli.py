@@ -44,8 +44,8 @@ def _console_progress(update: ProgressUpdate) -> None:
         sys.stdout.write("\n")
 
 
-def command_index(container: ApplicationContainer, arguments: argparse.Namespace) -> int:
-    """Выполняет индексацию папки сертификатов.
+def command_import(container: ApplicationContainer, arguments: argparse.Namespace) -> int:
+    """Импортирует Excel-базу сертификатов в SQLite.
 
     Args:
         container: Контейнер зависимостей.
@@ -54,24 +54,19 @@ def command_index(container: ApplicationContainer, arguments: argparse.Namespace
     Returns:
         Код возврата процесса.
     """
-    directory = Path(arguments.directory).expanduser().resolve()
-    if not directory.is_dir():
-        print(f"Ошибка: папка не найдена — {directory}", file=sys.stderr)
+    path = Path(arguments.file).expanduser().resolve()
+    if not path.is_file():
+        print(f"Ошибка: файл не найден — {path}", file=sys.stderr)
         return 2
 
-    print(f"Индексация папки: {directory}")
-    reporter = ProgressReporter(_console_progress)
-    result = container.indexing_service.scan(directory, reporter=reporter, force=arguments.force)
+    print(f"Импорт базы сертификатов: {path}")
+    result = container.certificate_import_service.import_file(path)
 
     print(f"\n{result.summary()}")
     print(f"Длительность: {result.duration_ms / 1000:.1f} с")
-    if result.errors:
-        print(f"\nОшибки ({len(result.errors)}):")
-        for line in container.indexing_service.collect_errors(result):
-            print(f"  · {line}")
 
     container.settings_service.update(
-        lambda settings: setattr(settings.indexing, "certificates_dir", str(directory))
+        lambda settings: setattr(settings.certificates, "excel_path", str(path))
     )
     return 0 if not result.failed else 1
 
@@ -92,9 +87,9 @@ def command_process(container: ApplicationContainer, arguments: argparse.Namespa
         return 2
 
     if arguments.certificates:
-        directory = Path(arguments.certificates).expanduser().resolve()
-        print(f"Индексация папки: {directory}")
-        container.indexing_service.scan(directory, reporter=ProgressReporter(_console_progress))
+        excel_path = Path(arguments.certificates).expanduser().resolve()
+        print(f"Импорт базы сертификатов: {excel_path}")
+        container.certificate_import_service.import_file(excel_path)
         print()
 
     print(f"Обработка заказа: {order_path.name}")
@@ -159,7 +154,9 @@ def command_search(container: ApplicationContainer, arguments: argparse.Namespac
         certificate = candidate.certificate
         expiry = certificate.expiry_date.strftime("%d.%m.%Y") if certificate.expiry_date else "—"
         print(f"  {candidate.percent:3d}%  {certificate.product_name}")
-        print(f"        срок {expiry} · {certificate.pdf_name} · {candidate.score.explain()}")
+        print(
+            f"        срок {expiry} · № {certificate.display_number} · {candidate.score.explain()}"
+        )
     return 0
 
 
@@ -177,9 +174,8 @@ def command_stats(container: ApplicationContainer, _: argparse.Namespace) -> int
     history = container.history_repository.statistics()
     products = container.product_repository.statistics()
 
-    print("Справочник сертификатов")
+    print("База сертификатов")
     print(f"  всего:              {certificates['total']}")
-    print(f"  активных:           {certificates['active']}")
     print(f"  просроченных:       {certificates['expired']}")
     print(f"  истекают за 90 дн.: {certificates['expiring_soon']}")
     print(f"  без срока:          {certificates['without_expiry']}")
@@ -216,12 +212,11 @@ def command_selfcheck(container: ApplicationContainer, _: argparse.Namespace) ->
     modules = [
         ("customtkinter", "графический интерфейс"),
         ("PIL", "иконки и изображения"),
-        ("fitz", "чтение PDF"),
+        ("fitz", "просмотр PDF (только отрисовка страниц)"),
         ("openpyxl", "чтение и запись Excel"),
         ("pandas", "отчёты"),
         ("rapidfuzz", "нечёткий поиск"),
         ("numpy", "векторные вычисления"),
-        ("watchdog", "наблюдение за папкой"),
         ("sentence_transformers", "семантический поиск (необязательно)"),
     ]
     missing_required = 0
@@ -271,13 +266,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command")
 
-    index_parser = subparsers.add_parser("index", help="проиндексировать папку сертификатов")
-    index_parser.add_argument("directory", help="путь к папке с PDF-сертификатами")
-    index_parser.add_argument("--force", action="store_true", help="переиндексировать все файлы")
+    import_parser = subparsers.add_parser("import", help="импортировать Excel-базу сертификатов")
+    import_parser.add_argument("file", help="путь к Excel-файлу базы сертификатов")
 
     process_parser = subparsers.add_parser("process", help="обработать файл заказа")
     process_parser.add_argument("order", help="путь к файлу заказа (.xlsx)")
-    process_parser.add_argument("--certificates", "-c", help="папка сертификатов для индексации")
+    process_parser.add_argument(
+        "--certificates", "-c", help="файл базы сертификатов (Excel) для импорта перед обработкой"
+    )
     process_parser.add_argument("--output", "-o", help="каталог результата")
     process_parser.add_argument("--sheet", help="имя листа книги")
     process_parser.add_argument("--no-copy", action="store_true", help="не копировать PDF")
@@ -318,7 +314,7 @@ def run(argv: list[str] | None = None) -> int:
         return 0
 
     commands = {
-        "index": command_index,
+        "import": command_import,
         "process": command_process,
         "search": command_search,
         "stats": command_stats,

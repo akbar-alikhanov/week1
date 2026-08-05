@@ -212,7 +212,15 @@ class OrderProcessingService:
 
             # --- Шаг 5. Копирование сертификатов ----------------------------
             if request.copy_certificates and export_settings.copy_certificates:
-                copier = CertificateCopyService(dirname=export_settings.certificates_dirname)
+                certificates_settings = self._settings.current.certificates
+                pdf_dir = (
+                    Path(certificates_settings.pdf_dir) if certificates_settings.pdf_dir else None
+                )
+                copier = CertificateCopyService(
+                    source_dir=pdf_dir,
+                    dirname=export_settings.certificates_dirname,
+                    recursive=certificates_settings.recursive_pdf_search,
+                )
                 outcome.copy_report = copier.copy_for_results(
                     outcome.results, outcome.output_file, reporter=reporter
                 )
@@ -347,7 +355,6 @@ def _to_history_item(run_id: str, result: MatchResult) -> ProcessingItem:
         certificate_id=certificate.id if certificate else None,
         certificate_number=result.certificate_number,
         certificate_expiry=result.expiry_date.isoformat() if result.expiry_date else "",
-        pdf_name=certificate.pdf_name if certificate else "",
         score=result.score,
         method=candidate.source.label if candidate else "",
         candidates_count=len(result.candidates),

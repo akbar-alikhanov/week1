@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, Final
 
 from app.core.text import normalize, token_key
-from app.core.units import UNIT_LABELS, Volume
+from app.core.units import Volume
 
 #: Сколько раз псевдоним, созданный не пользователем, должен быть применён,
 #: прежде чем его уровень доверия поднимется с 80 % до 95 % («подтверждено
@@ -31,26 +31,29 @@ CONFIDENCE_SQL: Final[str] = (
 
 @dataclass(slots=True)
 class Alias:
-    """Запомненное соответствие «наименование из заказа → сертификат».
+    """Запомненное соответствие «наименование из заказа → товар».
 
     Псевдоним создаётся, когда пользователь вручную выбирает сертификат в окне
     неоднозначности, исправляет автоматический подбор или добавляет запись
     напрямую в словаре соответствий. При следующей обработке заказа этап
-    псевдонимов срабатывает раньше нечёткого и семантического поиска, что даёт
-    мгновенный и стопроцентно предсказуемый результат.
+    псевдонимов срабатывает раньше нечёткого и семантического поиска и
+    является абсолютным источником истины: наименование и объём из записи
+    ищутся в базе сертификатов строгим равенством, без права на откат к
+    нечёткому/семантическому подбору.
+
+    Запись не привязана к конкретной строке базы сертификатов (нет
+    ``certificate_id``): при каждом подборе она заново разрешается в текущие
+    строки базы по паре «нормализованное наименование + объём», поэтому
+    связь никогда не устаревает после переимпорта Excel.
 
     Attributes:
         id: Первичный ключ (``None`` до сохранения).
         source_text: Наименование, как его написал пользователь/заказ.
         normalized_source: Каноническая форма исходного наименования — ключ поиска.
         token_source: Токен-ключ, инвариантный к порядку слов.
-        certificate_id: Идентификатор сертификата-цели.
-        target_name: Наименование товара в сертификате (для отображения).
-        target_pdf_name: Имя PDF-файла (сохраняется, чтобы связь пережила
-            переиндексацию с изменением идентификаторов).
-        brand: Бренд товара (редактируется независимо от сертификата).
-        volume_value: Числовое значение объёма в базовых единицах.
-        volume_unit: Базовая единица объёма (``ml``, ``g``, ``pcs``).
+        target_name: Русское наименование товара (как в базе сертификатов).
+        brand: Бренд товара (произвольная заметка пользователя).
+        volume_ml: Объём товара в базовых единицах (обычно мл).
         weight: Приоритет псевдонима при конфликте (больше — важнее).
         hit_count: Сколько раз псевдоним применялся при подборе.
         is_manual: Создан пользователем (``True``) или автоматически.
@@ -62,15 +65,12 @@ class Alias:
     """
 
     source_text: str
-    certificate_id: int | None = None
     id: int | None = None
     normalized_source: str = ""
     token_source: str = ""
     target_name: str = ""
-    target_pdf_name: str = ""
     brand: str = ""
-    volume_value: float | None = None
-    volume_unit: str = ""
+    volume_ml: float | None = None
     weight: float = 1.0
     hit_count: int = 0
     is_manual: bool = True
@@ -90,7 +90,12 @@ class Alias:
     @property
     def is_valid(self) -> bool:
         """Признак пригодности псевдонима к сохранению."""
-        return bool(self.normalized_source) and self.certificate_id is not None
+        return bool(self.normalized_source) and bool(self.target_name.strip())
+
+    @property
+    def normalized_target(self) -> str:
+        """Нормализованное русское наименование — ключ строгого поиска в базе."""
+        return normalize(self.target_name)
 
     @property
     def confidence(self) -> float:
@@ -124,28 +129,26 @@ class Alias:
         Returns:
             :class:`~app.core.units.Volume` либо ``None``, если объём не указан.
         """
-        if self.volume_value is None or not self.volume_unit:
+        if self.volume_ml is None:
             return None
-        dimension = {"ml": "volume", "g": "mass", "pcs": "count"}.get(self.volume_unit, "volume")
         return Volume(
-            value=self.volume_value,
-            unit=self.volume_unit,
-            base_value=self.volume_value,
-            base_unit=self.volume_unit,
-            dimension=dimension,
+            value=self.volume_ml,
+            unit="ml",
+            base_value=self.volume_ml,
+            base_unit="ml",
+            dimension="volume",
         )
 
     @property
     def volume_label(self) -> str:
         """Отформатированный объём для отображения в таблице."""
-        if self.volume_value is None or not self.volume_unit:
+        if self.volume_ml is None:
             return ""
-        label = UNIT_LABELS.get(self.volume_unit, self.volume_unit)
-        return f"{self.volume_value:g} {label}"
+        return f"{self.volume_ml:g} мл"
 
     def describe(self) -> str:
         """Возвращает представление вида ``источник = цель`` для интерфейса."""
-        return f"{self.source_text} = {self.target_name or self.target_pdf_name}"
+        return f"{self.source_text} = {self.target_name}"
 
     def to_row(self) -> dict[str, Any]:
         """Преобразует псевдоним в словарь для SQLite."""
@@ -154,12 +157,9 @@ class Alias:
             "source_text": self.source_text,
             "normalized_source": self.normalized_source,
             "token_source": self.token_source,
-            "certificate_id": self.certificate_id,
             "target_name": self.target_name,
-            "target_pdf_name": self.target_pdf_name,
             "brand": self.brand,
-            "volume_value": self.volume_value,
-            "volume_unit": self.volume_unit,
+            "volume_ml": self.volume_ml,
             "weight": self.weight,
             "hit_count": self.hit_count,
             "is_manual": int(self.is_manual),
@@ -188,12 +188,9 @@ class Alias:
             source_text=data.get("source_text") or "",
             normalized_source=data.get("normalized_source") or "",
             token_source=data.get("token_source") or "",
-            certificate_id=data.get("certificate_id"),
             target_name=data.get("target_name") or "",
-            target_pdf_name=data.get("target_pdf_name") or "",
             brand=data.get("brand") or "",
-            volume_value=data.get("volume_value"),
-            volume_unit=data.get("volume_unit") or "",
+            volume_ml=data.get("volume_ml"),
             weight=float(data.get("weight") or 1.0),
             hit_count=int(data.get("hit_count") or 0),
             is_manual=bool(data.get("is_manual", 1)),

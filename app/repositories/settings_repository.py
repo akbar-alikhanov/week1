@@ -16,8 +16,9 @@ from typing import Any
 from app.repositories.base import BaseRepository
 
 #: Ключи служебного состояния.
-KEY_LAST_INDEXED_AT = "last_indexed_at"
-KEY_LAST_CERTIFICATES_DIR = "last_certificates_dir"
+KEY_LAST_CERTIFICATES_IMPORT_AT = "last_certificates_import_at"
+KEY_LAST_CERTIFICATES_EXCEL_PATH = "last_certificates_excel_path"
+KEY_CERTIFICATES_EXCEL_FINGERPRINT = "certificates_excel_fingerprint"
 KEY_EMBEDDING_MODEL = "embedding_model"
 KEY_WINDOW_STATE = "window_state"
 KEY_FIRST_RUN_COMPLETED = "first_run_completed"

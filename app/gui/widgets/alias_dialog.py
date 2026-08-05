@@ -15,7 +15,7 @@ from app.gui.widgets.data_table import Column, DataTable
 from app.gui.widgets.dialogs import ModalDialog
 from app.models.alias import Alias
 from app.models.alias_audit import AliasAuditEntry
-from app.models.certificate import Certificate
+from app.models.certificate_product import CertificateProduct
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -28,6 +28,10 @@ class AliasEditDialog(ModalDialog):
     (включая проверку дубликатов) выполняет вызывающая сторона после того,
     как диалог закрылся с результатом: так раздел, показывающий диалог,
     остаётся единственным местом, где принимаются решения о сохранении.
+
+    Запись словаря не привязывается к конкретной строке базы сертификатов —
+    поиск справа лишь подсказывает точное русское название и объём, чтобы
+    пользователь не ошибся вручную; сохраняются только текст и число.
     """
 
     def __init__(
@@ -35,7 +39,7 @@ class AliasEditDialog(ModalDialog):
         master: Any,
         theme: Theme,
         *,
-        search_certificates: Callable[[str], list[Certificate]],
+        search_certificates: Callable[[str], list[CertificateProduct]],
         alias: Alias | None = None,
     ) -> None:
         """Создаёт диалог добавления/редактирования.
@@ -43,7 +47,7 @@ class AliasEditDialog(ModalDialog):
         Args:
             master: Родительское окно.
             theme: Активная тема оформления.
-            search_certificates: Функция поиска сертификатов по тексту.
+            search_certificates: Функция поиска по базе сертификатов.
             alias: Редактируемая запись; ``None`` — создание новой.
         """
         editing = alias is not None
@@ -57,12 +61,10 @@ class AliasEditDialog(ModalDialog):
         )
         self._search_certificates = search_certificates
         self._alias = alias
-        self._selected_certificate: Certificate | None = None
         self._selected_summary: dict[str, str] = {
             "name": alias.target_name if alias else "",
-            "pdf": alias.target_pdf_name if alias else "",
+            "number": "",
         }
-        self._certificate_id = alias.certificate_id if alias else None
 
         # Кнопки сохранения собираются и занимают своё место ПЕРВЫМИ, до
         # остального содержимого. В ``pack()`` порядок вызова определяет,
@@ -75,7 +77,7 @@ class AliasEditDialog(ModalDialog):
         self._build_form()
         self._build_certificate_picker()
 
-        if alias is not None:
+        if alias is not None and alias.target_name:
             self._render_selected_summary()
 
     # ------------------------------------------------------------- разметка
@@ -111,11 +113,18 @@ class AliasEditDialog(ModalDialog):
         _field(right, theme, "Комментарий", self.note_var)
 
     def _build_certificate_picker(self) -> None:
-        """Строит область поиска и выбора связанного сертификата."""
+        """Строит область поиска по базе сертификатов — только для подсказки.
+
+        Выбор строки здесь не создаёт связи с конкретной записью базы: он
+        лишь подставляет точное русское название и объём в поля формы выше,
+        чтобы избежать опечаток. Само соответствие всегда ищется заново по
+        этим двум значениям в момент подбора — так оно не устаревает после
+        переимпорта Excel-базы.
+        """
         theme = self._theme
         ctk.CTkLabel(
             self.container,
-            text="СЕРТИФИКАТ",
+            text="ПОИСК В БАЗЕ СЕРТИФИКАТОВ (необязательно)",
             font=theme.font(FontRole.CAPTION),
             text_color=theme.color("text_muted"),
             anchor="w",
@@ -123,7 +132,7 @@ class AliasEditDialog(ModalDialog):
 
         self._summary_label = ctk.CTkLabel(
             self.container,
-            text="Сертификат не выбран",
+            text="Название и объём можно ввести вручную или подобрать из базы",
             font=theme.font(FontRole.BODY_STRONG),
             text_color=theme.color("text_muted"),
             anchor="w",
@@ -184,7 +193,7 @@ class AliasEditDialog(ModalDialog):
 
     # ------------------------------------------------------------- поиск
     def _run_search(self) -> None:
-        """Ищет сертификаты по введённому запросу."""
+        """Ищет позиции базы сертификатов по введённому запросу."""
         query = self._search_var.get().strip()
         if not query:
             return
@@ -206,8 +215,8 @@ class AliasEditDialog(ModalDialog):
             text_color=self._theme.color("text_muted"),
         ).pack(pady=Spacing.LG)
 
-    def _render_results(self, results: list[Certificate]) -> None:
-        """Отображает найденные сертификаты списком с кнопкой выбора."""
+    def _render_results(self, results: list[CertificateProduct]) -> None:
+        """Отображает найденные позиции базы списком с кнопкой выбора."""
         for child in self._results.winfo_children():
             child.destroy()
 
@@ -239,8 +248,7 @@ class AliasEditDialog(ModalDialog):
                 part
                 for part in (
                     str(certificate.volume) if certificate.volume else "",
-                    certificate.brand,
-                    certificate.pdf_name,
+                    certificate.display_number,
                 )
                 if part
             )
@@ -259,8 +267,8 @@ class AliasEditDialog(ModalDialog):
                 command=self._make_select(certificate),
             ).pack(side="right", padx=Spacing.SM)
 
-    def _make_select(self, certificate: Certificate) -> Callable[[], None]:
-        """Создаёт обработчик выбора для конкретного сертификата в списке.
+    def _make_select(self, certificate: CertificateProduct) -> Callable[[], None]:
+        """Создаёт обработчик выбора для конкретной позиции в списке.
 
         Именованная фабрика вместо ``lambda item=certificate: ...`` — так же,
         как и в остальном интерфейсе, это устраняет и трудности вывода типов
@@ -268,36 +276,41 @@ class AliasEditDialog(ModalDialog):
         замыкания в цикле.
 
         Args:
-            certificate: Сертификат, который нужно привязать к обработчику.
+            certificate: Позиция базы, которую нужно привязать к обработчику.
 
         Returns:
             Обработчик без аргументов, пригодный для ``command=``.
         """
         return lambda: self._select_certificate(certificate)
 
-    def _select_certificate(self, certificate: Certificate) -> None:
-        """Привязывает диалог к выбранному сертификату, подставляя его поля."""
-        self._selected_certificate = certificate
-        self._certificate_id = certificate.id
+    def _select_certificate(self, certificate: CertificateProduct) -> None:
+        """Подставляет в форму название и объём выбранной позиции базы.
+
+        Ничего не «привязывается» — только предзаполняет пустые поля формы,
+        чтобы избежать опечаток; сохранённая запись словаря не будет знать,
+        какая именно строка базы была выбрана здесь.
+        """
         if not self.target_var.get().strip():
             self.target_var.set(certificate.product_name)
-        if not self.brand_var.get().strip() and certificate.brand:
-            self.brand_var.set(certificate.brand)
-        if not self.volume_var.get().strip() and certificate.volume:
-            self.volume_var.set(certificate.volume.format())
-        self._selected_summary = {"name": certificate.product_name, "pdf": certificate.pdf_name}
+        if not self.volume_var.get().strip() and certificate.volume_ml is not None:
+            self.volume_var.set(f"{certificate.volume_ml:g} мл")
+        self._selected_summary = {
+            "name": certificate.product_name,
+            "number": certificate.display_number,
+        }
         self._render_selected_summary()
 
     def _render_selected_summary(self) -> None:
-        """Обновляет строку с описанием выбранного сертификата."""
+        """Обновляет строку с описанием выбранной позиции базы."""
         name = self._selected_summary.get("name")
-        pdf = self._selected_summary.get("pdf")
+        number = self._selected_summary.get("number")
         if not name:
             self._summary_label.configure(
-                text="Сертификат не выбран", text_color=self._theme.color("text_muted")
+                text="Название и объём можно ввести вручную или подобрать из базы",
+                text_color=self._theme.color("text_muted"),
             )
             return
-        text = f"{name}" + (f" · {pdf}" if pdf else "")
+        text = f"{name}" + (f" · {number}" if number else "")
         self._summary_label.configure(text=text, text_color=self._theme.color("text"))
 
     # -------------------------------------------------------------- отправка
@@ -309,8 +322,8 @@ class AliasEditDialog(ModalDialog):
         if not source_text:
             self._show_error("Укажите системное название")
             return
-        if self._certificate_id is None:
-            self._show_error("Выберите сертификат из списка справа")
+        if not target_name:
+            self._show_error("Укажите русское название товара")
             return
 
         volume = extract_primary_volume(self.volume_var.get())
@@ -319,11 +332,8 @@ class AliasEditDialog(ModalDialog):
             {
                 "source_text": source_text,
                 "target_name": target_name,
-                "certificate_id": self._certificate_id,
-                "certificate": self._selected_certificate,
                 "brand": self.brand_var.get().strip(),
-                "volume_value": volume.base_value if volume else None,
-                "volume_unit": volume.base_unit if volume else "",
+                "volume_ml": volume.base_value if volume else None,
                 "note": self.note_var.get().strip(),
             }
         )

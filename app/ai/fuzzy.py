@@ -19,7 +19,7 @@ from typing import Final
 from rapidfuzz import fuzz, process, utils
 
 from app.core.text import alpha_signature, normalize, transliterate
-from app.models.certificate import Certificate
+from app.models.certificate_product import CertificateProduct
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -49,7 +49,7 @@ class LexicalHit:
         matched_form: Форма, давшая лучшую оценку (``normalized``/``translit``).
     """
 
-    certificate: Certificate
+    certificate: CertificateProduct
     score: float
     matched_form: str
 
@@ -62,13 +62,13 @@ class LexicalIndex:
     поиск в RapidFuzz выполняется в C-коде без удержания GIL.
     """
 
-    def __init__(self, certificates: Sequence[Certificate]) -> None:
+    def __init__(self, certificates: Sequence[CertificateProduct]) -> None:
         """Строит индекс по списку сертификатов.
 
         Args:
             certificates: Сертификаты, участвующие в подборе.
         """
-        self._certificates: list[Certificate] = list(certificates)
+        self._certificates: list[CertificateProduct] = list(certificates)
         self._normalized: list[str] = []
         self._translit: list[str] = []
         self._signatures: list[str] = []
@@ -97,11 +97,11 @@ class LexicalIndex:
         return len(self._certificates)
 
     @property
-    def certificates(self) -> list[Certificate]:
+    def certificates(self) -> list[CertificateProduct]:
         """Проиндексированные сертификаты в порядке добавления."""
         return self._certificates
 
-    def certificate_at(self, index: int) -> Certificate:
+    def certificate_at(self, index: int) -> CertificateProduct:
         """Возвращает сертификат по внутреннему индексу.
 
         Args:

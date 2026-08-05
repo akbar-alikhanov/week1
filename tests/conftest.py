@@ -14,10 +14,10 @@ from pathlib import Path
 import pytest
 
 from app.database.connection import Database
-from app.models.certificate import Certificate
+from app.models.certificate_product import CertificateProduct
 from app.repositories.alias_repository import AliasRepository
 from app.repositories.cache_repository import CacheRepository
-from app.repositories.certificate_repository import CertificateRepository
+from app.repositories.certificate_product_repository import CertificateProductRepository
 from app.repositories.history_repository import HistoryRepository
 from app.repositories.product_repository import ProductRepository
 from app.repositories.settings_repository import SettingsRepository
@@ -33,9 +33,9 @@ def database(tmp_path: Path) -> Iterator[Database]:
 
 
 @pytest.fixture
-def certificate_repository(database: Database) -> CertificateRepository:
-    """Репозиторий сертификатов поверх временной базы."""
-    return CertificateRepository(database)
+def certificate_repository(database: Database) -> CertificateProductRepository:
+    """Репозиторий базы сертификатов поверх временной базы."""
+    return CertificateProductRepository(database)
 
 
 @pytest.fixture
@@ -70,39 +70,28 @@ def settings_repository(database: Database) -> SettingsRepository:
 
 def make_certificate(
     product_name: str,
-    pdf_path: str,
     *,
-    volume_value: float | None = None,
-    volume_unit: str = "",
+    volume_ml: float | None = None,
     expiry_date: dt.date | None = None,
     certificate_number: str = "",
-    brand: str = "",
-    row_index: int = 0,
-) -> Certificate:
-    """Создаёт сертификат для использования в тестах.
+    source_row: int = 0,
+) -> CertificateProduct:
+    """Создаёт строку базы сертификатов для использования в тестах.
 
     Args:
         product_name: Наименование товара.
-        pdf_path: Путь к PDF-файлу (может быть фиктивным).
-        volume_value: Объём в базовых единицах.
-        volume_unit: Базовая единица объёма.
-        expiry_date: Срок действия.
+        volume_ml: Объём в базовых единицах (``None`` — извлечь из названия).
+        expiry_date: Срок годности.
         certificate_number: Номер сертификата.
-        brand: Торговая марка.
-        row_index: Порядковый номер позиции внутри приложения к сертификату
-            (несколько записей с одним ``pdf_path`` и разными ``row_index``
-            имитируют файл с таблицей приложения).
+        source_row: Порядковый номер строки в исходном Excel-файле.
 
     Returns:
-        Заполненный объект :class:`Certificate`.
+        Заполненный объект :class:`CertificateProduct`.
     """
-    return Certificate(
+    return CertificateProduct(
         product_name=product_name,
-        pdf_path=pdf_path,
-        volume_value=volume_value,
-        volume_unit=volume_unit,
+        volume_ml=volume_ml,
         expiry_date=expiry_date,
         certificate_number=certificate_number,
-        brand=brand,
-        row_index=row_index,
+        source_row=source_row,
     )

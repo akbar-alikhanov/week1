@@ -132,38 +132,29 @@ class MatchingSettings:
 
 
 @dataclass(slots=True)
-class IndexingSettings:
-    """Параметры сканирования и индексации папки сертификатов.
+class CertificatesSettings:
+    """Параметры источника данных о сертификатах.
+
+    Excel — единственный источник данных; SQLite — только его индекс. Папка
+    PDF используется исключительно для копирования найденного сертификата в
+    результат — её содержимое никогда не читается и не разбирается.
 
     Attributes:
-        certificates_dir: Последняя использованная папка сертификатов.
-        max_workers: Число потоков индексации (0 — автоопределение).
-        watch_enabled: Следить ли за папкой в фоне и индексировать новые файлы.
-        rescan_on_start: Проверять ли изменения при запуске приложения.
-        recursive: Обходить ли вложенные папки.
-        reindex_on_hash_change: Переиндексировать файл при изменении хэша.
-        max_pages: Сколько страниц PDF анализировать. Титульный лист занимает
-            страницу-две, но таблица товарных позиций («ПРИЛОЖЕНИЕ К
-            СЕРТИФИКАТУ») может растянуться на десятки страниц — предел
-            защищает только от аномально больших файлов, не от обычных
-            приложений.
-        watch_debounce_seconds: Пауза перед обработкой изменений в папке.
+        excel_path: Путь к Excel-файлу базы сертификатов.
+        pdf_dir: Папка с PDF-файлами сертификатов (для копирования по номеру
+            в имени файла).
+        rescan_on_start: Проверять ли изменение Excel-файла при запуске
+            приложения и переимпортировать его при необходимости.
+        recursive_pdf_search: Искать ли PDF во вложенных папках ``pdf_dir``.
     """
 
-    certificates_dir: str = ""
-    max_workers: int = 0
-    watch_enabled: bool = True
+    excel_path: str = ""
+    pdf_dir: str = ""
     rescan_on_start: bool = True
-    recursive: bool = True
-    reindex_on_hash_change: bool = True
-    max_pages: int = 200
-    watch_debounce_seconds: float = 2.0
+    recursive_pdf_search: bool = True
 
     def validate(self) -> None:
-        """Приводит значения к допустимым диапазонам."""
-        self.max_workers = int(_clamp(self.max_workers, 0, 64))
-        self.max_pages = int(_clamp(self.max_pages, 1, 500))
-        self.watch_debounce_seconds = _clamp(self.watch_debounce_seconds, 0.2, 60.0)
+        """Приводит значения к допустимым диапазонам (нет числовых полей)."""
 
 
 @dataclass(slots=True)
@@ -286,14 +277,14 @@ class AppSettings:
 
     Attributes:
         matching: Параметры алгоритма подбора.
-        indexing: Параметры индексации.
+        certificates: Параметры источника данных о сертификатах.
         export: Параметры выгрузки результата.
         ui: Параметры интерфейса.
         maintenance: Параметры обслуживания.
     """
 
     matching: MatchingSettings = field(default_factory=MatchingSettings)
-    indexing: IndexingSettings = field(default_factory=IndexingSettings)
+    certificates: CertificatesSettings = field(default_factory=CertificatesSettings)
     export: ExportSettings = field(default_factory=ExportSettings)
     ui: UiSettings = field(default_factory=UiSettings)
     maintenance: MaintenanceSettings = field(default_factory=MaintenanceSettings)
@@ -301,7 +292,7 @@ class AppSettings:
     def validate(self) -> None:
         """Проверяет и нормализует все группы настроек."""
         self.matching.validate()
-        self.indexing.validate()
+        self.certificates.validate()
         self.export.validate()
         self.ui.validate()
         self.maintenance.validate()
@@ -495,9 +486,11 @@ class SettingsService:
             Конфигурация по умолчанию.
         """
         with self._lock:
-            preserved_dir = self._settings.indexing.certificates_dir
+            preserved_excel = self._settings.certificates.excel_path
+            preserved_pdf_dir = self._settings.certificates.pdf_dir
             self._settings = AppSettings()
-            self._settings.indexing.certificates_dir = preserved_dir
+            self._settings.certificates.excel_path = preserved_excel
+            self._settings.certificates.pdf_dir = preserved_pdf_dir
         self.save()
         return self._settings
 

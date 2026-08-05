@@ -34,10 +34,8 @@ _SORT_EXPRESSIONS: dict[str, str] = {
 _EXCHANGE_FIELDS: tuple[str, ...] = (
     "source_text",
     "target_name",
-    "target_pdf_name",
     "brand",
-    "volume_value",
-    "volume_unit",
+    "volume_ml",
     "weight",
     "hit_count",
     "is_manual",
@@ -83,9 +81,9 @@ class AliasRepository(BaseRepository[Alias]):
     def save(self, alias: Alias) -> Alias:
         """Создаёт или обновляет псевдоним (используется самообучением).
 
-        Уникальность обеспечивается парой «нормализованный источник + цель»:
-        повторное обучение на том же соответствии обновляет запись, а не
-        порождает дубликаты.
+        Уникальность обеспечивается нормализованным исходным наименованием:
+        повторное обучение на том же товаре обновляет запись, а не порождает
+        дубликат.
 
         Args:
             alias: Сохраняемый псевдоним.
@@ -94,7 +92,7 @@ class AliasRepository(BaseRepository[Alias]):
             Сохранённый псевдоним с заполненным ``id``.
         """
         alias.updated_at = datetime.now()
-        existing = self.find_exact_target(alias.normalized_source, alias.certificate_id)
+        existing = self.find_by_normalized_source(alias.normalized_source)
         with self._db.transaction(exclusive=True) as connection:
             if existing is not None and existing.id is not None:
                 before = existing.to_row()
@@ -156,8 +154,8 @@ class AliasRepository(BaseRepository[Alias]):
         В отличие от :meth:`save`, не выполняет слияние с существующей
         записью — вызывающая сторона (сервис) обязана заранее проверить
         дубликаты через :meth:`find_similar` и получить подтверждение
-        пользователя. Точный дубликат по ключу (нормализованное наименование
-        + сертификат) отклоняется безусловно.
+        пользователя. Точный дубликат по нормализованному исходному
+        наименованию отклоняется безусловно.
 
         Args:
             alias: Новый псевдоним (``id`` игнорируется).
@@ -168,10 +166,9 @@ class AliasRepository(BaseRepository[Alias]):
         Raises:
             DuplicateAliasError: Если точно такая же запись уже существует.
         """
-        if self.find_exact_target(alias.normalized_source, alias.certificate_id) is not None:
+        if self.find_by_normalized_source(alias.normalized_source) is not None:
             raise DuplicateAliasError(
-                "Такое соответствие уже есть в словаре",
-                details=f"{alias.source_text} → certificate_id={alias.certificate_id}",
+                "Такое соответствие уже есть в словаре", details=alias.source_text
             )
         alias.id = None
         alias.created_at = datetime.now()
@@ -195,14 +192,13 @@ class AliasRepository(BaseRepository[Alias]):
         """Изменяет существующую запись словаря по её идентификатору.
 
         В отличие от :meth:`save`, обновляет запись «на месте» независимо от
-        того, изменились ли ключевые поля (наименование, сертификат) —
-        именно этого ожидает пользователь, редактируя строку в таблице.
+        того, изменились ли ключевые поля (наименование, объём) — именно
+        этого ожидает пользователь, редактируя строку в таблице.
 
         Args:
             alias_id: Идентификатор изменяемой записи.
             **changes: Новые значения полей (``source_text``, ``target_name``,
-                ``target_pdf_name``, ``certificate_id``, ``brand``,
-                ``volume_value``, ``volume_unit``, ``note``).
+                ``brand``, ``volume_ml``, ``note``).
 
         Returns:
             Обновлённая запись.
@@ -223,11 +219,9 @@ class AliasRepository(BaseRepository[Alias]):
             current.token_source = token_key(current.source_text)
         current.updated_at = datetime.now()
 
-        conflict = self.find_exact_target(current.normalized_source, current.certificate_id)
+        conflict = self.find_by_normalized_source(current.normalized_source)
         if conflict is not None and conflict.id != alias_id:
-            raise DuplicateAliasError(
-                "Уже есть другая запись с таким же наименованием и сертификатом"
-            )
+            raise DuplicateAliasError("Уже есть другая запись с таким же системным названием")
 
         with self._db.transaction(exclusive=True) as connection:
             self._update(
@@ -414,19 +408,19 @@ class AliasRepository(BaseRepository[Alias]):
         return self.bulk_delete(ids)
 
     # ------------------------------------------------------------- чтение
-    def find_exact_target(self, normalized_source: str, certificate_id: int | None) -> Alias | None:
-        """Находит псевдоним по паре «источник + сертификат».
+    def find_by_normalized_source(self, normalized_source: str) -> Alias | None:
+        """Находит псевдоним по нормализованному исходному наименованию.
 
         Args:
             normalized_source: Нормализованное исходное наименование.
-            certificate_id: Идентификатор сертификата-цели.
 
         Returns:
             Псевдоним либо ``None``.
         """
+        if not normalized_source:
+            return None
         row = self._db.query_one(
-            "SELECT * FROM aliases WHERE normalized_source = ? AND certificate_id IS ?",
-            (normalized_source, certificate_id),
+            "SELECT * FROM aliases WHERE normalized_source = ?", (normalized_source,)
         )
         return self._to_model(row) if row else None
 
@@ -470,8 +464,7 @@ class AliasRepository(BaseRepository[Alias]):
         query: str = "",
         *,
         brand: str = "",
-        volume_value: float | None = None,
-        volume_unit: str = "",
+        volume_ml: float | None = None,
         sort: str = "updated_desc",
         limit: int = 500,
         offset: int = 0,
@@ -479,13 +472,12 @@ class AliasRepository(BaseRepository[Alias]):
         """Ищет записи словаря для раздела «Словарь товаров».
 
         Поиск ведётся одновременно по системному наименованию, наименованию в
-        сертификате, бренду, файлу и комментарию — без учёта регистра.
+        базе сертификатов, бренду и комментарию — без учёта регистра.
 
         Args:
             query: Текст поиска (пусто — без фильтра по тексту).
             brand: Точное значение бренда (пусто — без фильтра).
-            volume_value: Значение объёма для фильтра (``None`` — без фильтра).
-            volume_unit: Единица объёма, дополняет ``volume_value``.
+            volume_ml: Значение объёма для фильтра (``None`` — без фильтра).
             sort: Ключ сортировки (см. :data:`_SORT_EXPRESSIONS`).
             limit: Максимум записей.
             offset: Смещение для постраничной загрузки.
@@ -493,32 +485,26 @@ class AliasRepository(BaseRepository[Alias]):
         Returns:
             Найденные записи.
         """
-        clauses, parameters = _build_filter(query, brand, volume_value, volume_unit)
+        clauses, parameters = _build_filter(query, brand, volume_ml)
         order = _SORT_EXPRESSIONS.get(sort, _SORT_EXPRESSIONS["updated_desc"])
         sql = f"SELECT * FROM aliases{clauses} ORDER BY {order} LIMIT ? OFFSET ?"
         rows = self._db.query_all(sql, (*parameters, limit, offset))
         return self._rows_to_models(rows)
 
     def count_search(
-        self,
-        query: str = "",
-        *,
-        brand: str = "",
-        volume_value: float | None = None,
-        volume_unit: str = "",
+        self, query: str = "", *, brand: str = "", volume_ml: float | None = None
     ) -> int:
         """Возвращает общее количество записей, подходящих под фильтр поиска.
 
         Args:
             query: Текст поиска.
             brand: Точное значение бренда.
-            volume_value: Значение объёма для фильтра.
-            volume_unit: Единица объёма.
+            volume_ml: Значение объёма для фильтра.
 
         Returns:
             Количество подходящих записей.
         """
-        clauses, parameters = _build_filter(query, brand, volume_value, volume_unit)
+        clauses, parameters = _build_filter(query, brand, volume_ml)
         return int(self._db.query_scalar(f"SELECT count(*) FROM aliases{clauses}", parameters) or 0)
 
     def list_all(self, *, limit: int = 0, search: str = "") -> list[Alias]:
@@ -547,18 +533,16 @@ class AliasRepository(BaseRepository[Alias]):
         )
         return [str(row["brand"]) for row in rows]
 
-    def list_volumes(self) -> list[tuple[float, str]]:
+    def list_volumes(self) -> list[float]:
         """Возвращает список различных объёмов для фильтра.
 
         Returns:
-            Пары ``(значение, единица)`` в порядке возрастания.
+            Значения объёма в порядке возрастания.
         """
         rows = self._db.query_all(
-            "SELECT DISTINCT volume_value, volume_unit FROM aliases "
-            "WHERE volume_value IS NOT NULL AND volume_unit != '' "
-            "ORDER BY volume_unit, volume_value"
+            "SELECT DISTINCT volume_ml FROM aliases WHERE volume_ml IS NOT NULL ORDER BY volume_ml"
         )
-        return [(float(row["volume_value"]), str(row["volume_unit"])) for row in rows]
+        return [float(row["volume_ml"]) for row in rows]
 
     def find_similar(
         self,
@@ -602,56 +586,6 @@ class AliasRepository(BaseRepository[Alias]):
                 scored.append((score, candidate))
         scored.sort(key=lambda pair: pair[0], reverse=True)
         return [candidate for _, candidate in scored[:limit]]
-
-    def count_for_certificate(self, certificate_id: int) -> int:
-        """Возвращает количество псевдонимов, ссылающихся на сертификат.
-
-        Args:
-            certificate_id: Идентификатор сертификата.
-
-        Returns:
-            Количество псевдонимов.
-        """
-        return self.count("certificate_id = ?", (certificate_id,))
-
-    def repair_links(self) -> int:
-        """Восстанавливает связи псевдонимов после переиндексации.
-
-        При смене идентификаторов сертификатов (например, после полной
-        переиндексации) псевдонимы переподвязываются по имени PDF-файла.
-
-        Returns:
-            Количество восстановленных связей.
-        """
-        rows = self._db.query_all(
-            "SELECT a.id AS alias_id, a.target_pdf_name AS pdf_name "
-            "FROM aliases a LEFT JOIN certificates c ON c.id = a.certificate_id "
-            "WHERE a.certificate_id IS NULL OR c.id IS NULL"
-        )
-        repaired = 0
-        with self._db.transaction(exclusive=True) as connection:
-            for row in rows:
-                pdf_name = str(row["pdf_name"] or "")
-                if not pdf_name:
-                    continue
-                target = connection.execute(
-                    "SELECT id FROM certificates WHERE pdf_name = ? AND is_active = 1 LIMIT 1",
-                    (pdf_name,),
-                ).fetchone()
-                if target is None:
-                    continue
-                connection.execute(
-                    "UPDATE aliases SET certificate_id = ?, updated_at = ? WHERE id = ?",
-                    (
-                        int(target["id"]),
-                        datetime.now().isoformat(timespec="seconds"),
-                        int(row["alias_id"]),
-                    ),
-                )
-                repaired += 1
-        if repaired:
-            _LOGGER.info("Восстановлено связей псевдонимов: %s", repaired)
-        return repaired
 
     # --------------------------------------------------------- журнал и undo
     def _write_audit(
@@ -803,11 +737,9 @@ class AliasRepository(BaseRepository[Alias]):
     def import_from_file(self, source: Path) -> tuple[int, int, int]:
         """Импортирует словарь из JSON, CSV или Excel.
 
-        Связь с сертификатом восстанавливается по имени PDF-файла, поэтому
-        файл переносим между машинами с разными базами. Записи, совпадающие
-        по ключу «наименование + сертификат» с уже существующими, сливаются
-        (обновляются), а не дублируются — счётчик применений при этом берётся
-        максимальный из двух источников.
+        Записи, совпадающие по нормализованному системному названию с уже
+        существующими, сливаются (обновляются), а не дублируются — счётчик
+        применений при этом берётся максимальный из двух источников.
 
         Args:
             source: Путь файла-источника.
@@ -841,35 +773,18 @@ class AliasRepository(BaseRepository[Alias]):
                 skipped += 1
                 continue
             source_text = str(record.get("source_text") or "").strip()
-            pdf_name = str(record.get("target_pdf_name") or "").strip()
-            if not source_text or not pdf_name:
-                skipped += 1
-                continue
-            certificate_row = self._db.query_one(
-                "SELECT id, product_name, brand, volume_value, volume_unit "
-                "FROM certificates WHERE pdf_name = ? ORDER BY is_active DESC LIMIT 1",
-                (pdf_name,),
-            )
-            if certificate_row is None:
+            target_name = str(record.get("target_name") or "").strip()
+            if not source_text or not target_name:
                 skipped += 1
                 continue
 
-            certificate_id = int(certificate_row["id"])
-            was_existing = (
-                self.find_exact_target(normalize(source_text), certificate_id) is not None
-            )
+            was_existing = self.find_by_normalized_source(normalize(source_text)) is not None
             self.save(
                 Alias(
                     source_text=source_text,
-                    certificate_id=certificate_id,
-                    target_name=str(record.get("target_name") or certificate_row["product_name"]),
-                    target_pdf_name=pdf_name,
-                    brand=str(record.get("brand") or certificate_row["brand"] or ""),
-                    volume_value=_to_float(record.get("volume_value"))
-                    or certificate_row["volume_value"],
-                    volume_unit=str(
-                        record.get("volume_unit") or certificate_row["volume_unit"] or ""
-                    ),
+                    target_name=target_name,
+                    brand=str(record.get("brand") or ""),
+                    volume_ml=_to_float(record.get("volume_ml")),
                     weight=float(record.get("weight") or 1.0),
                     note=str(record.get("note") or ""),
                 )
@@ -888,9 +803,7 @@ class AliasRepository(BaseRepository[Alias]):
 # --------------------------------------------------------------------------- #
 # Вспомогательные функции модуля
 # --------------------------------------------------------------------------- #
-def _build_filter(
-    query: str, brand: str, volume_value: float | None, volume_unit: str
-) -> tuple[str, list[Any]]:
+def _build_filter(query: str, brand: str, volume_ml: float | None) -> tuple[str, list[Any]]:
     """Строит условие ``WHERE`` и параметры для поиска по словарю."""
     conditions: list[str] = []
     parameters: list[Any] = []
@@ -900,17 +813,17 @@ def _build_filter(
         pattern = f"%{text}%"
         conditions.append(
             "(lower(source_text) LIKE ? OR lower(target_name) LIKE ? OR lower(brand) LIKE ? "
-            "OR lower(target_pdf_name) LIKE ? OR lower(note) LIKE ?)"
+            "OR lower(note) LIKE ?)"
         )
-        parameters.extend([pattern, pattern, pattern, pattern, pattern])
+        parameters.extend([pattern, pattern, pattern, pattern])
 
     if brand:
         conditions.append("brand = ?")
         parameters.append(brand)
 
-    if volume_value is not None:
-        conditions.append("volume_value = ? AND volume_unit = ?")
-        parameters.extend([volume_value, volume_unit])
+    if volume_ml is not None:
+        conditions.append("volume_ml = ?")
+        parameters.append(volume_ml)
 
     clause = f" WHERE {' AND '.join(conditions)}" if conditions else ""
     return clause, parameters
@@ -921,10 +834,8 @@ def _to_exchange_record(alias: Alias) -> dict[str, Any]:
     return {
         "source_text": alias.source_text,
         "target_name": alias.target_name,
-        "target_pdf_name": alias.target_pdf_name,
         "brand": alias.brand,
-        "volume_value": alias.volume_value,
-        "volume_unit": alias.volume_unit,
+        "volume_ml": alias.volume_ml,
         "weight": alias.weight,
         "hit_count": alias.hit_count,
         "is_manual": int(alias.is_manual),

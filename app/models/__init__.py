@@ -5,8 +5,8 @@
 """
 
 from app.models.alias import Alias
-from app.models.certificate import Certificate
-from app.models.history import IndexingResult, ProcessingItem, ProcessingRun
+from app.models.certificate_product import CertificateProduct
+from app.models.history import ImportResult, ProcessingItem, ProcessingRun
 from app.models.matching import (
     MatchCandidate,
     MatchResult,
@@ -19,8 +19,8 @@ from app.models.product import Product
 
 __all__ = [
     "Alias",
-    "Certificate",
-    "IndexingResult",
+    "CertificateProduct",
+    "ImportResult",
     "MatchCandidate",
     "MatchResult",
     "MatchSource",

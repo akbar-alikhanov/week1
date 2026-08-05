@@ -51,7 +51,6 @@ def _matched_result(row: OrderRow) -> MatchResult:
     """Создаёт результат с найденным сертификатом."""
     certificate = make_certificate(
         row.product_name,
-        "/c/1.pdf",
         certificate_number="UZ.183255",
         expiry_date=dt.date(2029, 3, 22),
     )

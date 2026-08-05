@@ -343,14 +343,12 @@ class Database:
                 datetime.fromtimestamp(self._path.stat().st_mtime) if self._path.exists() else None
             ),
         }
-        for table in ("certificates", "products", "aliases", "history", "history_items"):
+        for table in ("certificate_products", "products", "aliases", "history", "history_items"):
             try:
                 stats[table] = int(self.query_scalar(f"SELECT count(*) FROM {table}") or 0)
             except DatabaseError:  # pragma: no cover — таблица может отсутствовать
                 stats[table] = 0
-        stats["certificates_active"] = int(
-            self.query_scalar("SELECT count(*) FROM certificates WHERE is_active = 1") or 0
-        )
+        stats["certificates"] = stats["certificate_products"]
         return stats
 
 

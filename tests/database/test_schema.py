@@ -5,21 +5,17 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from app.database.schema import (
-    _SCHEMA_V1,
-    TARGET_VERSION,
-    apply_migrations,
-    current_version,
-    has_fts,
-)
+from app.database.schema import _SCHEMA_V1, TARGET_VERSION, apply_migrations, current_version
 
 
 def _seed_v1_database(path: Path) -> sqlite3.Connection:
     """Создаёт базу данных версии 1 с тестовыми данными, минуя миграции.
 
-    Воспроизводит состояние реальной установки до обновления: несколько
-    сертификатов (один — с несколькими помечающими его псевдонимами) в
-    исходной схеме, где ``pdf_path`` был единственным ключом файла.
+    Воспроизводит состояние реальной установки до перехода на Excel как
+    источник данных: сертификаты из PDF (``certificates``) и псевдоним,
+    ссылающийся на один из них через ``certificate_id`` — именно эта связь
+    рвётся при миграции до версии 4, поскольку у Excel-базы нет общих
+    идентификаторов со старым PDF-справочником.
 
     Args:
         path: Путь к файлу базы данных.
@@ -64,62 +60,71 @@ class TestMigrationToTargetVersion:
         assert current_version(connection) == TARGET_VERSION
         connection.close()
 
-    def test_certificate_data_and_ids_survive_upgrade(self, tmp_path: Path) -> None:
-        """Существующие записи сертификатов сохраняют id и данные после апгрейда."""
+    def test_old_certificates_table_is_removed(self, tmp_path: Path) -> None:
+        """Таблица PDF-справочника и её полнотекстовый индекс удаляются."""
         connection = _seed_v1_database(tmp_path / "legacy.db")
         apply_migrations(connection)
 
-        rows = {
-            row["id"]: dict(row)
-            for row in connection.execute("SELECT * FROM certificates ORDER BY id")
+        tables = {
+            row["name"]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type IN ('table', 'view')"
+            )
         }
-        assert set(rows) == {1, 2}
-        assert rows[1]["product_name"] == "Лечебные травы 100 мл"
-        assert rows[1]["pdf_path"] == "/c/1.pdf"
+        assert "certificates" not in tables
+        assert "certificates_fts" not in tables
         connection.close()
 
-    def test_existing_rows_get_row_index_zero(self, tmp_path: Path) -> None:
-        """Записи, существовавшие до появления построчных позиций, получают row_index = 0."""
+    def test_certificate_products_table_created_empty(self, tmp_path: Path) -> None:
+        """Новая таблица Excel-базы создаётся с ожидаемыми колонками, но пустой.
+
+        Строки старого PDF-справочника не переносятся: у Excel-базы нет
+        отображения на прежние идентификаторы, а данные впредь поступают
+        только из импорта Excel-файла пользователя.
+        """
         connection = _seed_v1_database(tmp_path / "legacy.db")
         apply_migrations(connection)
 
-        values = [
-            row["row_index"] for row in connection.execute("SELECT row_index FROM certificates")
-        ]
-        assert values == [0, 0]
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(certificate_products)")}
+        assert columns == {
+            "id",
+            "product_name",
+            "normalized_name",
+            "volume_ml",
+            "expiry_date",
+            "certificate_number",
+            "source_row",
+        }
+        count = connection.execute("SELECT count(*) FROM certificate_products").fetchone()[0]
+        assert count == 0
         connection.close()
 
-    def test_alias_foreign_key_survives_table_rebuild(self, tmp_path: Path) -> None:
-        """Псевдоним продолжает ссылаться на тот же сертификат после пересборки таблицы."""
+    def test_alias_survives_rebuild_without_certificate_id(self, tmp_path: Path) -> None:
+        """Псевдоним переживает пересборку таблицы, но теряет certificate_id."""
         connection = _seed_v1_database(tmp_path / "legacy.db")
         apply_migrations(connection)
+
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(aliases)")}
+        assert "certificate_id" not in columns
+        assert "target_pdf_name" not in columns
+        assert "volume_ml" in columns
 
         alias = connection.execute(
-            "SELECT certificate_id FROM aliases WHERE source_text = 'Herbal Doctor Syrup'"
+            "SELECT source_text FROM aliases WHERE source_text = 'Herbal Doctor Syrup'"
         ).fetchone()
-        assert alias["certificate_id"] == 1
+        assert alias is not None
         connection.close()
 
-    def test_composite_unique_constraint_active_after_upgrade(self, tmp_path: Path) -> None:
-        """После апгрейда уникальна пара (pdf_path, row_index), а не сам путь."""
+    def test_aliases_unique_constraint_is_source_text_only(self, tmp_path: Path) -> None:
+        """После апгрейда уникален только normalized_source, без пары с сертификатом."""
         connection = _seed_v1_database(tmp_path / "legacy.db")
         apply_migrations(connection)
 
-        # Тот же файл, другая позиция — должно приниматься.
-        connection.execute(
-            "INSERT INTO certificates "
-            "(product_name, pdf_path, row_index, indexed_at, updated_at) "
-            "VALUES ('Вторая позиция', '/c/1.pdf', 1, '2025-01-01T00:00:00', "
-            "'2025-01-01T00:00:00')"
-        )
-        connection.commit()
-
-        # Тот же файл и та же позиция — обязано отклоняться.
         try:
             connection.execute(
-                "INSERT INTO certificates "
-                "(product_name, pdf_path, row_index, indexed_at, updated_at) "
-                "VALUES ('Дубликат', '/c/1.pdf', 0, '2025-01-01T00:00:00', '2025-01-01T00:00:00')"
+                "INSERT INTO aliases (source_text, normalized_source, created_at, updated_at) "
+                "VALUES ('Herbal Doctor Syrup', 'herbal doctor syrup', "
+                "'2025-01-01T00:00:00', '2025-01-01T00:00:00')"
             )
             connection.commit()
             raised = False
@@ -128,28 +133,25 @@ class TestMigrationToTargetVersion:
         assert raised
         connection.close()
 
-    def test_fts_index_present_and_searchable_after_upgrade(self, tmp_path: Path) -> None:
-        """Полнотекстовый индекс воссоздан и находит перенесённые записи."""
+    def test_embeddings_cache_cleared_on_upgrade(self, tmp_path: Path) -> None:
+        """Кэш векторов очищается — старые идентификаторы сертификатов не имеют смысла."""
         connection = _seed_v1_database(tmp_path / "legacy.db")
         apply_migrations(connection)
 
-        assert has_fts(connection)
-        matches = connection.execute(
-            "SELECT rowid FROM certificates_fts WHERE certificates_fts MATCH ?", ("травы",)
-        ).fetchall()
-        assert len(matches) == 1
+        count = connection.execute("SELECT count(*) FROM embeddings").fetchone()[0]
+        assert count == 0
         connection.close()
 
     def test_second_call_is_a_no_op(self, tmp_path: Path) -> None:
         """Повторный вызов apply_migrations на уже актуальной базе ничего не меняет."""
         connection = _seed_v1_database(tmp_path / "legacy.db")
         apply_migrations(connection)
-        count_before = connection.execute("SELECT count(*) FROM certificates").fetchone()[0]
+        count_before = connection.execute("SELECT count(*) FROM certificate_products").fetchone()[0]
 
         result_version = apply_migrations(connection)
 
         assert result_version == TARGET_VERSION
-        count_after = connection.execute("SELECT count(*) FROM certificates").fetchone()[0]
+        count_after = connection.execute("SELECT count(*) FROM certificate_products").fetchone()[0]
         assert count_after == count_before
         connection.close()
 
@@ -161,6 +163,7 @@ class TestMigrationToTargetVersion:
         result_version = apply_migrations(connection)
 
         assert result_version == TARGET_VERSION
-        columns = {row[1] for row in connection.execute("PRAGMA table_info(certificates)")}
-        assert "row_index" in columns
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(certificate_products)")}
+        assert "normalized_name" in columns
+        assert "volume_ml" in columns
         connection.close()

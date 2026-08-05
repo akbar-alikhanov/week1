@@ -24,7 +24,7 @@ from app.core.logging_setup import install_excepthook
 _LOGGER = logging.getLogger(__name__)
 
 #: Команды, обрабатываемые консольным режимом.
-_CLI_COMMANDS = frozenset({"index", "process", "search", "stats", "selfcheck"})
+_CLI_COMMANDS = frozenset({"import", "process", "search", "stats", "selfcheck"})
 
 #: Глобальные флаги консольного парсера, поглощающие следующий аргумент —
 #: нужны, чтобы отличить их значение от имени подкоманды при сканировании.
@@ -77,7 +77,7 @@ def _parse_gui_arguments(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--version", action="version", version=f"{APP_NAME} {APP_VERSION}")
     parser.add_argument("--data-dir", help="каталог данных приложения")
     parser.add_argument("--order", help="файл заказа, открываемый при запуске")
-    parser.add_argument("--certificates", help="папка сертификатов")
+    parser.add_argument("--certificates", help="файл базы сертификатов (Excel)")
     parser.add_argument(
         "--reset-window", action="store_true", help="сбросить сохранённое положение окна"
     )
@@ -124,7 +124,7 @@ def run_gui_mode(argv: list[str]) -> int:
     if arguments.certificates:
         container.settings_service.update(
             lambda settings: setattr(
-                settings.indexing, "certificates_dir", str(Path(arguments.certificates).resolve())
+                settings.certificates, "excel_path", str(Path(arguments.certificates).resolve())
             )
         )
     if arguments.order:

@@ -1,4 +1,4 @@
-"""Раздел справочника сертификатов с поиском и просмотром PDF."""
+"""Раздел базы сертификатов с поиском и просмотром PDF."""
 
 from __future__ import annotations
 
@@ -11,13 +11,13 @@ import customtkinter as ctk
 from app.core.dates import format_date
 from app.gui.theme import FontRole, Spacing
 from app.gui.views.base_view import BaseView
-from app.gui.widgets.base import format_bytes
 from app.gui.widgets.card import SectionCard
 from app.gui.widgets.controls import SegmentedFilter, secondary_button
 from app.gui.widgets.data_table import Column, DataTable
 from app.gui.widgets.pdf_viewer import PdfViewer
 from app.gui.widgets.search_entry import SearchEntry
-from app.models.certificate import Certificate
+from app.models.certificate_product import CertificateProduct
+from app.services.certificate_file_locator import find_pdf
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -26,10 +26,10 @@ _PAGE_SIZE = 500
 
 
 class CertificatesView(BaseView):
-    """Просмотр и поиск по справочнику сертификатов."""
+    """Просмотр и поиск по базе сертификатов (Excel, проиндексированной в SQLite)."""
 
     title = "Сертификаты"
-    subtitle = "Поиск по справочнику, просмотр документов и сведений об извлечённых полях"
+    subtitle = "Поиск по базе сертификатов и просмотр PDF-файлов, найденных по номеру"
 
     def __init__(self, master: Any, app: Any, **kwargs: Any) -> None:
         """Создаёт раздел.
@@ -40,7 +40,7 @@ class CertificatesView(BaseView):
             **kwargs: Дополнительные параметры ``CTkFrame``.
         """
         super().__init__(master, app, **kwargs)
-        self._certificates: list[Certificate] = []
+        self._certificates: list[CertificateProduct] = []
         self._filter = "all"
         self._query = ""
 
@@ -50,9 +50,9 @@ class CertificatesView(BaseView):
         secondary_button(
             self.actions,
             self.theme,
-            text="Переиндексировать",
+            text="Импортировать заново",
             icon="refresh",
-            command=lambda: self.app.navigate("dashboard", action="reindex"),
+            command=lambda: self.app.navigate("dashboard", action="reimport"),
         ).pack(side="right")
 
         toolbar = ctk.CTkFrame(self.content, fg_color="transparent", width=0, height=0)
@@ -61,7 +61,7 @@ class CertificatesView(BaseView):
         self.search = SearchEntry(
             toolbar,
             self.theme,
-            placeholder="Наименование, номер сертификата, бренд или файл…",
+            placeholder="Наименование или номер сертификата…",
             on_search=self._on_search,
             width=440,
         )
@@ -75,7 +75,7 @@ class CertificatesView(BaseView):
                 ("valid", "Действующие"),
                 ("expiring", "Истекают"),
                 ("expired", "Просроченные"),
-                ("incomplete", "Без данных"),
+                ("incomplete", "Без срока"),
             ],
             on_change=self._on_filter,
         ).pack(side="left", padx=(Spacing.MD, 0))
@@ -98,18 +98,15 @@ class CertificatesView(BaseView):
             split,
             self.theme,
             columns=(
-                Column("product", "Наименование", width=280, stretch=True),
+                Column("product", "Наименование", width=320, stretch=True),
                 Column("volume", "Объём", width=90, anchor="center"),
-                Column("number", "Номер", width=160),
-                Column("expiry", "Действует до", width=110, anchor="center"),
-                Column("brand", "Бренд", width=120),
-                Column("file", "Файл", width=140),
+                Column("number", "Номер сертификата", width=180),
+                Column("expiry", "Срок годности", width=110, anchor="center"),
+                Column("row", "Строка Excel", width=90, anchor="center", numeric=True),
             ),
             on_select=self._on_select,
-            on_activate=self._open_external,
             context_actions=(
-                ("Открыть PDF во внешней программе", self._open_external),
-                ("Показать папку с файлом", self._reveal),
+                ("Показать PDF во внешней программе", self._open_external),
                 ("-", lambda _: None),
                 ("Скопировать номер сертификата", self._copy_number),
             ),
@@ -126,7 +123,7 @@ class CertificatesView(BaseView):
             side,
             self.theme,
             title="Сведения",
-            subtitle="Выберите сертификат в списке",
+            subtitle="Выберите позицию в списке",
             icon="info",
             animator=self.app.animator,
         )
@@ -161,22 +158,19 @@ class CertificatesView(BaseView):
         self.search.focus_input()
 
     def refresh(self) -> None:
-        """Перечитывает справочник с учётом поиска и фильтра."""
+        """Перечитывает базу сертификатов с учётом поиска и фильтра."""
         repository = self.app.container.certificate_repository
         try:
-            if self._query:
-                found = repository.search(self._query, limit=_PAGE_SIZE, include_inactive=True)
-            else:
-                found = repository.search("", limit=_PAGE_SIZE, include_inactive=False)
+            found = repository.search(self._query, limit=_PAGE_SIZE)
         except Exception:
-            _LOGGER.exception("Не удалось загрузить справочник сертификатов")
+            _LOGGER.exception("Не удалось загрузить базу сертификатов")
             return
 
         self._certificates = [item for item in found if self._matches_filter(item)]
         self._render()
 
-    def _matches_filter(self, certificate: Certificate) -> bool:
-        """Проверяет соответствие сертификата активному фильтру."""
+    def _matches_filter(self, certificate: CertificateProduct) -> bool:
+        """Проверяет соответствие позиции активному фильтру."""
         if self._filter == "all":
             return True
         if self._filter == "valid":
@@ -187,11 +181,11 @@ class CertificatesView(BaseView):
             days = certificate.days_until_expiry
             return days is not None and 0 <= days <= 90
         if self._filter == "incomplete":
-            return certificate.expiry_date is None or certificate.volume_value is None
+            return certificate.expiry_date is None
         return True
 
     def _render(self) -> None:
-        """Отображает найденные сертификаты в таблице."""
+        """Отображает найденные позиции в таблице."""
         rows: list[tuple[str, dict[str, Any], str]] = []
         for index, certificate in enumerate(self._certificates):
             tag = ""
@@ -199,8 +193,6 @@ class CertificatesView(BaseView):
                 tag = "expired"
             elif (certificate.days_until_expiry or 999) <= 90:
                 tag = "warning"
-            elif not certificate.is_active:
-                tag = "muted"
 
             rows.append(
                 (
@@ -210,15 +202,14 @@ class CertificatesView(BaseView):
                         "volume": str(certificate.volume) if certificate.volume else "—",
                         "number": certificate.display_number,
                         "expiry": format_date(certificate.expiry_date),
-                        "brand": certificate.brand or "—",
-                        "file": certificate.pdf_name,
+                        "row": certificate.source_row or "—",
                     },
                     tag,
                 )
             )
 
         self._table.set_rows(rows)
-        total = self.app.container.certificate_repository.count("is_active = 1")
+        total = self.app.container.certificate_repository.count()
         self._count_label.configure(text=f"показано {len(rows)} из {total}")
 
     def _on_search(self, query: str) -> None:
@@ -232,44 +223,30 @@ class CertificatesView(BaseView):
         self.refresh()
 
     def _on_select(self, row_id: str) -> None:
-        """Показывает сведения и документ выбранного сертификата."""
+        """Показывает сведения и, если найден, документ выбранной позиции."""
         certificate = self._certificate_at(row_id)
         if certificate is None:
             return
         self._show_details(certificate)
-        self._viewer.open(certificate.path if certificate.path.exists() else None)
+        self._viewer.open(self._locate_pdf(certificate))
 
-    def _show_details(self, certificate: Certificate) -> None:
+    def _show_details(self, certificate: CertificateProduct) -> None:
         """Заполняет карточку сведений."""
         for child in self._details_body.winfo_children():
             child.destroy()
 
-        self._details_card.set_subtitle(certificate.pdf_name)
-
-        size = ""
-        try:
-            if certificate.path.exists():
-                size = format_bytes(certificate.path.stat().st_size)
-        except OSError:
-            size = ""
+        self._details_card.set_subtitle(certificate.display_number)
 
         fields: list[tuple[str, str]] = [
             ("Товар", certificate.product_name),
-            ("Номер", certificate.display_number),
+            ("Номер сертификата", certificate.display_number),
             ("Объём", str(certificate.volume) if certificate.volume else "не определён"),
-            ("Выдан", format_date(certificate.certificate_date)),
             ("Действует до", format_date(certificate.expiry_date)),
-            ("Бренд", certificate.brand or "—"),
-            ("Изготовитель", certificate.manufacturer or "—"),
-            ("Страна", certificate.country or "—"),
-            ("Орган", certificate.issued_by or "—"),
-            ("Полнота разбора", f"{certificate.extraction_confidence * 100:.0f} %"),
-            ("Проиндексирован", certificate.indexed_at.strftime("%d.%m.%Y %H:%M")),
-            ("Файл", f"{certificate.pdf_path}{f' · {size}' if size else ''}"),
+            ("Строка в Excel", str(certificate.source_row or "—")),
         ]
 
         if certificate.is_expired:
-            fields.insert(0, ("ВНИМАНИЕ", "Срок действия сертификата истёк"))
+            fields.insert(0, ("ВНИМАНИЕ", "Срок годности истёк"))
 
         for label, value in fields:
             row = ctk.CTkFrame(self._details_body, fg_color="transparent", width=0, height=0)
@@ -279,7 +256,7 @@ class CertificatesView(BaseView):
                 text=label,
                 font=self.theme.font(FontRole.CAPTION),
                 text_color=self.theme.color("danger" if label == "ВНИМАНИЕ" else "text_muted"),
-                width=130,
+                width=140,
                 anchor="w",
             ).pack(side="left")
             ctk.CTkLabel(
@@ -293,24 +270,31 @@ class CertificatesView(BaseView):
             ).pack(side="left", fill="x", expand=True)
 
     # -------------------------------------------------------------- действия
-    def _certificate_at(self, row_id: str) -> Certificate | None:
-        """Возвращает сертификат по идентификатору строки."""
+    def _certificate_at(self, row_id: str) -> CertificateProduct | None:
+        """Возвращает позицию базы по идентификатору строки."""
         try:
             return self._certificates[int(row_id)]
         except (ValueError, IndexError):
             return None
 
+    def _locate_pdf(self, certificate: CertificateProduct) -> Path | None:
+        """Ищет PDF-файл сертификата по номеру в настроенной папке."""
+        settings = self.app.settings.certificates
+        directory = Path(settings.pdf_dir) if settings.pdf_dir else None
+        return find_pdf(
+            directory, certificate.certificate_number, recursive=settings.recursive_pdf_search
+        )
+
     def _open_external(self, row_id: str) -> None:
         """Открывает PDF во внешней программе."""
         certificate = self._certificate_at(row_id)
-        if certificate is not None:
-            self.app.open_path(certificate.path)
-
-    def _reveal(self, row_id: str) -> None:
-        """Открывает папку, содержащую файл сертификата."""
-        certificate = self._certificate_at(row_id)
-        if certificate is not None:
-            self.app.open_path(certificate.path.parent)
+        if certificate is None:
+            return
+        path = self._locate_pdf(certificate)
+        if path is None:
+            self.app.toasts.warning(f"PDF-файл сертификата {certificate.display_number} не найден")
+            return
+        self.app.open_path(path)
 
     def _copy_number(self, row_id: str) -> None:
         """Копирует номер сертификата в буфер обмена."""

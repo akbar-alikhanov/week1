@@ -1,273 +1,29 @@
-"""Чтение PDF-сертификатов и построение доменных объектов.
+"""Отрисовка страниц PDF-сертификатов для встроенного просмотрщика.
 
-Используется PyMuPDF (fitz) — самая быстрая из доступных библиотек: разбор
-типового двухстраничного сертификата занимает единицы миллисекунд, а C-ядро
-освобождает GIL, что позволяет эффективно распараллеливать индексацию.
+PDF больше не являются источником данных — данные о сертификатах берутся
+только из Excel-базы (см. ``app.services.certificate_import_service``).
+Единственная оставшаяся роль этого модуля — показать пользователю страницу
+документа как изображение, чтобы он мог визуально сверить найденный
+сертификат; текст PDF нигде не читается и не разбирается.
 """
 
 from __future__ import annotations
 
-import hashlib
 import logging
-from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
-from typing import Any
 
-from app.core.constants import PDF_MAX_PAGES_TO_PARSE, RAW_TEXT_EXCERPT_LIMIT
 from app.core.exceptions import PdfParsingError
-from app.core.units import Volume, extract_primary_volume
-from app.models.certificate import Certificate
-from app.parsers.field_extractors import ExtractedFields, extract_all, extract_appendix_rows
 
 _LOGGER = logging.getLogger(__name__)
 
-#: Размер блока при вычислении хэша файла.
-_HASH_CHUNK_SIZE = 1 << 20  # 1 МБ
-
-
-@dataclass(frozen=True, slots=True)
-class PdfDocumentInfo:
-    """Технические сведения о PDF-файле.
-
-    Attributes:
-        text: Извлечённый текст.
-        page_count: Количество страниц.
-        file_size: Размер файла в байтах.
-        file_mtime: Время последнего изменения.
-        file_hash: SHA-256 содержимого.
-        has_text_layer: Признак наличия текстового слоя.
-    """
-
-    text: str
-    page_count: int
-    file_size: int
-    file_mtime: float
-    file_hash: str
-    has_text_layer: bool
-
-
-def compute_file_hash(path: Path) -> str:
-    """Вычисляет SHA-256 содержимого файла.
-
-    Хэш — надёжный критерий «файл изменился»: время модификации меняется при
-    копировании папки, а содержимое остаётся прежним, и переиндексация
-    десятков тысяч неизменных файлов была бы напрасной.
-
-    Args:
-        path: Путь к файлу.
-
-    Returns:
-        Хэш в шестнадцатеричном виде.
-
-    Raises:
-        PdfParsingError: Если файл недоступен для чтения.
-    """
-    digest = hashlib.sha256()
-    try:
-        with path.open("rb") as handle:
-            while chunk := handle.read(_HASH_CHUNK_SIZE):
-                digest.update(chunk)
-    except OSError as error:
-        raise PdfParsingError(
-            f"Не удалось прочитать файл {path.name}", path=path, details=str(error)
-        ) from error
-    return digest.hexdigest()
-
 
 class PdfParser:
-    """Извлекает текст и поля сертификата из PDF-файла.
+    """Отрисовывает страницы PDF-сертификата в растровое изображение.
 
-    Класс не обращается к базе данных и не знает о настройках приложения —
-    это чистый преобразователь «файл → доменный объект», что делает его
-    тривиально тестируемым.
+    Использует PyMuPDF (fitz) — самая быстрая из доступных библиотек для
+    рендеринга. Класс не обращается к базе данных и не знает о настройках
+    приложения.
     """
-
-    def __init__(self, *, max_pages: int = PDF_MAX_PAGES_TO_PARSE) -> None:
-        """Создаёт парсер.
-
-        Args:
-            max_pages: Максимум страниц, читаемых из одного документа.
-                Сертификаты редко длиннее двух страниц, а ограничение
-                защищает от аномально больших файлов.
-        """
-        self._max_pages = max(1, max_pages)
-
-    # ------------------------------------------------------------ извлечение
-    def read_document(self, path: Path, *, compute_hash: bool = True) -> PdfDocumentInfo:
-        """Читает PDF и возвращает его текст и технические характеристики.
-
-        Args:
-            path: Путь к PDF-файлу.
-            compute_hash: Вычислять ли хэш содержимого.
-
-        Returns:
-            Сведения о документе.
-
-        Raises:
-            PdfParsingError: Если файл повреждён, зашифрован или недоступен.
-        """
-        try:
-            import fitz  # PyMuPDF
-        except ImportError as error:  # pragma: no cover — зависимость обязательна
-            raise PdfParsingError(
-                "Библиотека PyMuPDF недоступна", path=path, details=str(error)
-            ) from error
-
-        try:
-            stat = path.stat()
-        except OSError as error:
-            raise PdfParsingError(
-                f"Файл недоступен: {path.name}", path=path, details=str(error)
-            ) from error
-
-        text_parts: list[str] = []
-        page_count = 0
-        try:
-            with fitz.open(path) as document:
-                if document.is_encrypted and not document.authenticate(""):
-                    raise PdfParsingError(f"PDF защищён паролем: {path.name}", path=path)
-                page_count = document.page_count
-                for index in range(min(page_count, self._max_pages)):
-                    page = document.load_page(index)
-                    text_parts.append(page.get_text("text"))
-        except PdfParsingError:
-            raise
-        except Exception as error:
-            raise PdfParsingError(
-                f"Не удалось прочитать PDF: {path.name}", path=path, details=str(error)
-            ) from error
-
-        text = "\n".join(text_parts)
-        return PdfDocumentInfo(
-            text=text,
-            page_count=page_count,
-            file_size=stat.st_size,
-            file_mtime=stat.st_mtime,
-            file_hash=compute_file_hash(path) if compute_hash else "",
-            has_text_layer=len(text.strip()) >= 40,
-        )
-
-    def extract_fields(self, path: Path, text: str) -> ExtractedFields:
-        """Извлекает поля сертификата из текста.
-
-        Args:
-            path: Путь к файлу (используется как источник запасного номера).
-            text: Текст документа.
-
-        Returns:
-            Извлечённые поля.
-        """
-        return extract_all(text, filename=path.name)
-
-    def parse(self, path: Path) -> list[Certificate]:
-        """Полностью разбирает PDF-файл в один или несколько объектов сертификата.
-
-        Орган по сертификации на практике удостоверяет одним файлом не один
-        товар, а таблицу из десятков позиций («ПРИЛОЖЕНИЕ К СЕРТИФИКАТУ»),
-        каждая — со своим наименованием и сроком годности; такой файл даёт
-        несколько :class:`Certificate` с общими для файла полями (изготовитель,
-        заявитель, номер) и собственными наименованием/сроком годности у каждой
-        позиции. Если таблица приложения не найдена (старый формат — один
-        товар на файл), используется прежнее посистемное извлечение.
-
-        Номер сертификата берётся из имени файла, а не из текста: на практике
-        оно совпадает с номером и не подвержено разночтениям распознавания
-        текста внутри PDF.
-
-        Args:
-            path: Путь к PDF-файлу.
-
-        Returns:
-            Список готовых к сохранению :class:`Certificate` (минимум один).
-
-        Raises:
-            PdfParsingError: Если файл не удалось прочитать.
-        """
-        info = self.read_document(path)
-        fields = self.extract_fields(path, info.text)
-        certificate_number = path.stem
-
-        now = datetime.now()
-        common: dict[str, Any] = {
-            "pdf_path": str(path),
-            "pdf_name": path.name,
-            "brand": fields.brand,
-            "manufacturer": fields.manufacturer,
-            "applicant": fields.applicant,
-            "country": fields.country,
-            "certificate_number": certificate_number,
-            "certificate_date": fields.certificate_date,
-            "valid_from": fields.valid_from,
-            "issued_by": fields.issued_by,
-            "page_count": info.page_count,
-            "file_hash": info.file_hash,
-            "file_size": info.file_size,
-            "file_mtime": info.file_mtime,
-            "indexed_at": now,
-            "updated_at": now,
-            "raw_text": info.text[:RAW_TEXT_EXCERPT_LIMIT],
-            "is_active": True,
-        }
-
-        appendix_rows = extract_appendix_rows(info.text)
-        if appendix_rows:
-            # Наименование и срок годности всегда найдены (иначе позиция не
-            # попадает в appendix_rows) — недостаёт только даты выдачи.
-            achieved = 4 + (1 if certificate_number else 0) + (1 if fields.certificate_date else 0)
-            confidence = round(achieved / 6.0, 3)
-            return [
-                Certificate(
-                    product_name=row.product_name,
-                    row_index=row.row_index,
-                    expiry_date=row.expiry_date,
-                    extraction_confidence=confidence,
-                    **self._volume_fields(row.product_name),
-                    **common,
-                )
-                for row in appendix_rows
-            ]
-
-        volume = extract_primary_volume(fields.product_name)
-        if volume is None:
-            # Объём может быть указан отдельной строкой в теле документа.
-            volume = extract_primary_volume(info.text[:1200])
-
-        certificate = Certificate(
-            product_name=fields.product_name or path.stem,
-            row_index=0,
-            expiry_date=fields.expiry_date,
-            extraction_confidence=fields.confidence,
-            volume_value=volume.base_value if volume else None,
-            volume_unit=volume.base_unit if volume else "",
-            volume_raw=volume.raw if volume else "",
-            pack_count=volume.pack_count if volume else 1,
-            **common,
-        )
-
-        if fields.warnings:
-            _LOGGER.debug("%s: %s", path.name, "; ".join(fields.warnings))
-        return [certificate]
-
-    @staticmethod
-    def _volume_fields(text: str) -> dict[str, Any]:
-        """Извлекает объём/фасовку из текста и приводит их к полям модели.
-
-        Args:
-            text: Наименование позиции, из которого нужно достать объём.
-
-        Returns:
-            Словарь с ключами ``volume_value``, ``volume_unit``, ``volume_raw``
-            и ``pack_count``, готовый для распаковки в конструктор
-            :class:`Certificate`.
-        """
-        volume: Volume | None = extract_primary_volume(text)
-        return {
-            "volume_value": volume.base_value if volume else None,
-            "volume_unit": volume.base_unit if volume else "",
-            "volume_raw": volume.raw if volume else "",
-            "pack_count": volume.pack_count if volume else 1,
-        }
 
     # -------------------------------------------------------------- рендеринг
     def render_page(
@@ -328,21 +84,3 @@ class PdfParser:
                 return int(document.page_count)
         except Exception:
             return 0
-
-    def describe(self, path: Path) -> dict[str, Any]:
-        """Возвращает сводку о документе для панели свойств.
-
-        Args:
-            path: Путь к PDF-файлу.
-
-        Returns:
-            Словарь «характеристика → значение».
-        """
-        info = self.read_document(path, compute_hash=False)
-        return {
-            "Файл": path.name,
-            "Страниц": info.page_count,
-            "Размер": f"{info.file_size / 1024:.1f} КБ",
-            "Изменён": datetime.fromtimestamp(info.file_mtime).strftime("%d.%m.%Y %H:%M"),
-            "Текстовый слой": "есть" if info.has_text_layer else "отсутствует (скан)",
-        }

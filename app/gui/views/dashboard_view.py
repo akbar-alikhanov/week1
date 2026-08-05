@@ -36,8 +36,8 @@ _LOGGER = logging.getLogger(__name__)
 #: Имя фоновой задачи обработки заказа.
 TASK_PROCESS = "process-order"
 
-#: Имя фоновой задачи индексации.
-TASK_INDEX = "index-certificates"
+#: Имя фоновой задачи импорта базы сертификатов.
+TASK_IMPORT = "import-certificates"
 
 
 class DashboardView(BaseView):
@@ -56,7 +56,7 @@ class DashboardView(BaseView):
         """
         super().__init__(master, app, **kwargs)
         self._order_path: Path | None = None
-        self._certificates_dir: Path | None = None
+        self._database_path: Path | None = None
         self._outcome: ProcessingOutcome | None = None
         self._results: list[MatchResult] = []
         self._filter = "all"
@@ -76,9 +76,9 @@ class DashboardView(BaseView):
         secondary_button(
             self.actions,
             self.theme,
-            text="Переиндексировать",
+            text="Импортировать заново",
             icon="refresh",
-            command=self.reindex,
+            command=self.reimport,
         ).pack(side="right")
 
     def _build_stats(self) -> None:
@@ -138,18 +138,18 @@ class DashboardView(BaseView):
         )
         self._order_zone.grid(row=0, column=0, sticky="nsew", padx=(0, Spacing.SM))
 
-        self._certificates_zone = FileDropZone(
+        self._database_zone = FileDropZone(
             zones,
             self.theme,
-            title="Папка сертификатов",
-            hint="Каталог с PDF-файлами сертификатов",
-            icon="folder",
-            select_directory=True,
-            on_selected=self._set_certificates_dir,
+            title="База сертификатов",
+            hint="Excel-файл: наименование, срок годности, номер сертификата",
+            icon="database",
+            extensions=tuple(EXCEL_EXTENSIONS),
+            on_selected=self._set_database_path,
             animator=self.app.animator,
-            dialog_title="Выберите папку сертификатов",
+            dialog_title="Выберите файл базы сертификатов",
         )
-        self._certificates_zone.grid(row=0, column=1, sticky="nsew", padx=(Spacing.SM, 0))
+        self._database_zone.grid(row=0, column=1, sticky="nsew", padx=(Spacing.SM, 0))
 
         controls = ctk.CTkFrame(card.content, fg_color="transparent", width=0, height=0)
         controls.pack(fill="x", pady=(Spacing.LG, 0))
@@ -215,7 +215,7 @@ class DashboardView(BaseView):
                 Column("certificate", "Сертификат", width=170),
                 Column("expiry", "Срок", width=100, anchor="center"),
                 Column("score", "Совпадение", width=100, anchor="center", numeric=True),
-                Column("pdf", "Файл", width=150),
+                Column("matched_product", "Товар в базе", width=220, stretch=True),
             ),
             on_activate=self._open_result_pdf,
             context_actions=(
@@ -254,7 +254,7 @@ class DashboardView(BaseView):
 
         expired = certificates.get("expired", 0)
         self._stat_cards["certificates"].update_value(
-            str(certificates.get("active", 0)),
+            str(certificates.get("total", 0)),
             f"просрочено: {expired}" if expired else "все действительны",
         )
         self._stat_cards["aliases"].update_value(str(aliases), "программа учится на ваших решениях")
@@ -270,11 +270,11 @@ class DashboardView(BaseView):
             "success" if rate >= 90 else "warning" if rate >= 70 else "danger"
         )
 
-        if self._certificates_dir is None:
-            stored = container.indexing_service.last_directory()
-            if stored and Path(stored).is_dir():
-                self._certificates_zone.set_path(Path(stored), notify=False)
-                self._certificates_dir = Path(stored)
+        if self._database_path is None:
+            stored = container.certificate_import_service.last_path()
+            if stored and Path(stored).is_file():
+                self._database_zone.set_path(Path(stored), notify=False)
+                self._database_path = Path(stored)
                 self._update_run_state()
 
     def _set_order(self, path: Path) -> None:
@@ -285,37 +285,37 @@ class DashboardView(BaseView):
         )
         self._update_run_state()
 
-    def _set_certificates_dir(self, path: Path) -> None:
-        """Запоминает выбранную папку сертификатов и запускает индексацию."""
-        self._certificates_dir = path
+    def _set_database_path(self, path: Path) -> None:
+        """Запоминает выбранный файл базы сертификатов и запускает импорт."""
+        self._database_path = path
         self.app.settings_service.update(
-            lambda settings: setattr(settings.indexing, "certificates_dir", str(path))
+            lambda settings: setattr(settings.certificates, "excel_path", str(path))
         )
         self._update_run_state()
-        self.reindex(silent=True)
+        self.reimport(silent=True)
 
     def browse_order(self) -> None:
         """Открывает диалог выбора файла заказа."""
         self.ensure_built()
         self._order_zone.browse()
 
-    def browse_certificates(self) -> None:
-        """Открывает диалог выбора папки сертификатов."""
+    def browse_database(self) -> None:
+        """Открывает диалог выбора файла базы сертификатов."""
         self.ensure_built()
-        self._certificates_zone.browse()
+        self._database_zone.browse()
 
-    def set_paths(self, order: Path | None = None, certificates: Path | None = None) -> None:
+    def set_paths(self, order: Path | None = None, database: Path | None = None) -> None:
         """Устанавливает пути извне (перетаскивание в окно, аргументы запуска).
 
         Args:
             order: Путь к файлу заказа.
-            certificates: Путь к папке сертификатов.
+            database: Путь к файлу базы сертификатов.
         """
         self.ensure_built()
         if order is not None:
             self._order_zone.set_path(order)
-        if certificates is not None:
-            self._certificates_zone.set_path(certificates)
+        if database is not None:
+            self._database_zone.set_path(database)
 
     def _update_run_state(self) -> None:
         """Включает или выключает кнопку запуска."""
@@ -328,47 +328,43 @@ class DashboardView(BaseView):
         except Exception:
             pass
 
-    # ------------------------------------------------------------- индексация
-    def reindex(self, *, force: bool = False, silent: bool = False) -> None:
-        """Запускает индексацию папки сертификатов.
+    # -------------------------------------------------------------- импорт
+    def reimport(self, *, silent: bool = False) -> None:
+        """Запускает (пере)импорт Excel-базы сертификатов.
 
         Args:
-            force: Переиндексировать все файлы заново.
-            silent: Не показывать уведомление об отсутствии изменений.
+            silent: Не показывать уведомление об успехе.
         """
-        directory = self._certificates_dir
-        if directory is None:
-            stored = self.app.container.indexing_service.last_directory()
-            directory = Path(stored) if stored else None
-        if directory is None or not directory.is_dir():
-            self.app.toasts.warning("Сначала выберите папку с сертификатами")
+        path = self._database_path
+        if path is None:
+            stored = self.app.container.certificate_import_service.last_path()
+            path = Path(stored) if stored else None
+        if path is None or not path.is_file():
+            self.app.toasts.warning("Сначала выберите файл базы сертификатов")
             return
 
-        service = self.app.container.indexing_service
-        self._progress.start(f"Индексация папки {directory.name}…")
+        service = self.app.container.certificate_import_service
+        self._progress.start(f"Импорт базы {path.name}…")
 
-        def _work(reporter: ProgressReporter) -> Any:
-            return service.scan(directory, reporter=reporter, force=force)
+        def _work(_reporter: ProgressReporter) -> Any:
+            return service.import_file(path)
 
         def _done(result: Any) -> None:
             self._progress.finish(result.summary(), success=not result.failed)
             self.app.container.matching_service.invalidate()
             self.refresh()
             if result.failed:
-                self.app.toasts.warning(
-                    f"{result.summary()}. Подробности — в журнале операций.",
-                    title="Индексация завершена",
-                )
-            elif not silent or result.changed:
-                self.app.toasts.success(result.summary(), title="Справочник обновлён")
+                self.app.toasts.warning(result.summary(), title="Импорт не выполнен")
+            elif not silent:
+                self.app.toasts.success(result.summary(), title="База сертификатов обновлена")
 
         self.app.tasks.run(
-            TASK_INDEX,
+            TASK_IMPORT,
             _work,
             on_success=_done,
             on_progress=self._progress.update,
-            on_error=lambda error: self._handle_error(error, "Ошибка индексации"),
-            on_cancelled=lambda: self._progress.finish("Индексация отменена", success=False),
+            on_error=lambda error: self._handle_error(error, "Ошибка импорта базы сертификатов"),
+            on_cancelled=lambda: self._progress.finish("Импорт отменён", success=False),
         )
 
     # -------------------------------------------------------------- обработка
@@ -429,7 +425,7 @@ class DashboardView(BaseView):
 
     def cancel_processing(self) -> None:
         """Отменяет активную фоновую операцию."""
-        for task in (TASK_PROCESS, TASK_INDEX):
+        for task in (TASK_PROCESS, TASK_IMPORT):
             if self.app.tasks.cancel(task):
                 self.app.toasts.info("Операция будет остановлена…")
                 return
@@ -574,7 +570,7 @@ class DashboardView(BaseView):
                         "certificate": result.certificate_number or "—",
                         "expiry": _format_expiry(result),
                         "score": f"{int(result.score * 100)} %" if result.score else "—",
-                        "pdf": certificate.pdf_name if certificate else "—",
+                        "matched_product": certificate.product_name if certificate else "—",
                     },
                     _row_tag(result.status),
                 )
@@ -589,7 +585,7 @@ class DashboardView(BaseView):
         if certificate is None:
             self.app.toasts.info("Для этой позиции сертификат не подобран")
             return
-        self.app.preview_pdf(certificate.path)
+        self.app.preview_pdf(certificate.certificate_number)
 
     def _change_certificate(self, row_id: str) -> None:
         """Открывает окно выбора для повторного подбора."""
@@ -677,7 +673,7 @@ class DashboardView(BaseView):
     def refresh_theme(self) -> None:
         """Обновляет цвета после смены темы."""
         super().refresh_theme()
-        for widget in (self._order_zone, self._certificates_zone, self._progress, self._table):
+        for widget in (self._order_zone, self._database_zone, self._progress, self._table):
             refresher = getattr(widget, "refresh_theme", None)
             if callable(refresher):
                 refresher()

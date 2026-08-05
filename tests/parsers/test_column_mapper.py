@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from app.parsers.column_mapper import (
     ROLE_CERTIFICATE,
     ROLE_EXPIRY,
@@ -16,7 +18,7 @@ class TestDetectMapping:
 
     def test_standard_header(self) -> None:
         """Стандартный заголовок распознаётся с ролями всех колонок."""
-        rows = [
+        rows: list[list[Any]] = [
             ["№", "Код", "Наименование товара", "Кол-во", "Сертификат", "Срок сертификата"],
             [1, "BT-1", "Товар А", 10, None, None],
             [2, "BT-2", "Товар Б", 20, None, None],
@@ -31,7 +33,7 @@ class TestDetectMapping:
 
     def test_header_not_on_first_row(self) -> None:
         """Заголовок, смещённый вниз (шапка компании), находится корректно."""
-        rows = [
+        rows: list[list[Any]] = [
             ['ООО "BALTON TRADING ASIA"', None, None],
             ["Заказ № 123 от 01.01.2025", None, None],
             [None, None, None],
@@ -67,7 +69,7 @@ class TestDetectMapping:
 
     def test_uzbek_headers(self) -> None:
         """Заголовки на узбекском языке распознаются."""
-        rows = [["Mahsulot nomi", "Miqdor"], ["Тестовый товар", 5]]
+        rows: list[list[Any]] = [["Mahsulot nomi", "Miqdor"], ["Тестовый товар", 5]]
         mapping = detect_mapping(rows)
         assert mapping.is_valid
         assert mapping.columns[ROLE_PRODUCT] == 0

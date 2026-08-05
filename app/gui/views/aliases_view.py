@@ -27,7 +27,7 @@ from app.gui.widgets.data_table import Column, DataTable, EmptyState
 from app.gui.widgets.dialogs import ask_confirmation
 from app.gui.widgets.search_entry import SearchEntry
 from app.models.alias import Alias
-from app.models.certificate import Certificate
+from app.models.certificate_product import CertificateProduct
 from app.services.alias_service import DuplicateWarning
 
 _LOGGER = logging.getLogger(__name__)
@@ -69,9 +69,9 @@ class AliasesView(BaseView):
         self._aliases: list[Alias] = []
         self._query = ""
         self._brand = ""
-        self._volume: tuple[float, str] | None = None
+        self._volume: float | None = None
         self._sort = _SORT_OPTIONS[0][0]
-        self._volume_lookup: dict[str, tuple[float, str]] = {}
+        self._volume_lookup: dict[str, float] = {}
         self._sort_lookup: dict[str, str] = {label: key for key, label in _SORT_OPTIONS}
 
     # ---------------------------------------------------------------- разметка
@@ -316,19 +316,15 @@ class AliasesView(BaseView):
         if not hasattr(self, "_table"):
             return
         service = self.app.container.alias_service
-        volume_value, volume_unit = self._volume if self._volume else (None, "")
         try:
             self._aliases = service.search(
                 self._query,
                 brand=self._brand,
-                volume_value=volume_value,
-                volume_unit=volume_unit,
+                volume_ml=self._volume,
                 sort=self._sort,
                 limit=_PAGE_SIZE,
             )
-            total = service.count_search(
-                self._query, brand=self._brand, volume_value=volume_value, volume_unit=volume_unit
-            )
+            total = service.count_search(self._query, brand=self._brand, volume_ml=self._volume)
             total_all = service.count()
         except Exception:
             _LOGGER.exception("Не удалось загрузить словарь соответствий")
@@ -361,9 +357,7 @@ class AliasesView(BaseView):
         if current_brand not in (_ALL_BRANDS, *brands):
             self._brand_menu.set(_ALL_BRANDS)
 
-        self._volume_lookup = {
-            _format_volume(value, unit): (value, unit) for value, unit in volumes
-        }
+        self._volume_lookup = {_format_volume(value): value for value in volumes}
         labels = [_ALL_VOLUMES, *self._volume_lookup]
         current_volume = self._volume_menu.get()
         self._volume_menu.configure(values=labels)
@@ -486,7 +480,7 @@ class AliasesView(BaseView):
         for child in self._details_body.winfo_children():
             child.destroy()
 
-        self._details_card.set_subtitle(alias.target_pdf_name or "файл не связан")
+        self._details_card.set_subtitle(alias.target_name or "русское название не указано")
 
         fields: list[tuple[str, str]] = [
             ("Товар в сертификате", alias.target_name or "—"),
@@ -557,16 +551,26 @@ class AliasesView(BaseView):
         ).pack(side="left", padx=(Spacing.SM, 0))
 
         related = self.app.container.alias_service.find_related_certificates(alias)
+        ctk.CTkLabel(
+            self._details_body,
+            text="СЕЙЧАС РАЗРЕШАЕТСЯ В (строгий поиск по базе)",
+            font=self.theme.font(FontRole.CAPTION),
+            text_color=self.theme.color("text_muted"),
+            anchor="w",
+        ).pack(fill="x", anchor="w", pady=(Spacing.LG, Spacing.XS))
         if related:
-            ctk.CTkLabel(
-                self._details_body,
-                text="ПОХОЖИЕ СЕРТИФИКАТЫ",
-                font=self.theme.font(FontRole.CAPTION),
-                text_color=self.theme.color("text_muted"),
-                anchor="w",
-            ).pack(fill="x", anchor="w", pady=(Spacing.LG, Spacing.XS))
             for certificate in related:
                 self._render_related_row(certificate)
+        else:
+            ctk.CTkLabel(
+                self._details_body,
+                text="Ничего не найдено — при подборе строка будет считаться ненайденной",
+                font=self.theme.font(FontRole.CAPTION),
+                text_color=self.theme.color("warning"),
+                anchor="w",
+                justify="left",
+                wraplength=260,
+            ).pack(fill="x", anchor="w")
 
         history = self.app.container.alias_service.audit_log(alias_id=alias.id, limit=3)
         if history:
@@ -592,8 +596,8 @@ class AliasesView(BaseView):
                 command=lambda: self._open_alias_history(alias),
             ).pack(anchor="w", pady=(Spacing.XS, 0))
 
-    def _render_related_row(self, certificate: Certificate) -> None:
-        """Отображает одну строку похожего сертификата в панели сведений."""
+    def _render_related_row(self, certificate: CertificateProduct) -> None:
+        """Отображает одну строку найденной позиции базы в панели сведений."""
         row = ctk.CTkFrame(
             self._details_body, fg_color=self.theme.color("surface_alt"), corner_radius=Radius.SM
         )
@@ -612,7 +616,7 @@ class AliasesView(BaseView):
             self.theme,
             text="",
             icon="eye",
-            command=lambda: self.app.preview_pdf(certificate.path),
+            command=lambda: self.app.preview_pdf(certificate.certificate_number),
         ).pack(side="right")
 
     # -------------------------------------------------------------- действия
@@ -647,11 +651,9 @@ class AliasesView(BaseView):
             return
         self._commit_edit(alias, result)
 
-    def _search_certificates(self, query: str) -> list[Certificate]:
-        """Ищет сертификаты для окна добавления/редактирования."""
-        return self.app.container.certificate_repository.search(
-            query, limit=15, include_inactive=False
-        )
+    def _search_certificates(self, query: str) -> list[CertificateProduct]:
+        """Ищет позиции базы сертификатов для окна добавления/редактирования."""
+        return self.app.container.certificate_repository.search(query, limit=15)
 
     def _commit_new(self, result: dict[str, Any]) -> None:
         """Сохраняет новую запись после проверки на дубликаты."""
@@ -660,18 +662,12 @@ class AliasesView(BaseView):
         if warning.has_matches and not self._confirm_duplicates(warning):
             return
 
-        certificate = result.get("certificate")
-        if certificate is None:
-            self.app.toasts.warning("Сертификат не выбран")
-            return
-
         try:
             service.add(
                 result["source_text"],
-                certificate,
+                result["target_name"],
                 brand=result["brand"],
-                volume_value=result["volume_value"],
-                volume_unit=result["volume_unit"],
+                volume_ml=result["volume_ml"],
                 note=result["note"],
             )
         except (DuplicateAliasError, ValueError) as error:
@@ -697,10 +693,8 @@ class AliasesView(BaseView):
                 alias.id,
                 source_text=result["source_text"],
                 target_name=result["target_name"],
-                certificate_id=result["certificate_id"],
                 brand=result["brand"],
-                volume_value=result["volume_value"],
-                volume_unit=result["volume_unit"],
+                volume_ml=result["volume_ml"],
                 note=result["note"],
             )
         except DuplicateAliasError as error:
@@ -727,14 +721,14 @@ class AliasesView(BaseView):
         self._open_certificate(self._alias_at(row_id))
 
     def _open_certificate(self, alias: Alias | None) -> None:
-        """Открывает сертификат, связанный с записью, во встроенном просмотрщике."""
+        """Открывает сертификат, на который сейчас разрешается запись."""
         if alias is None:
             return
-        certificate = self.app.container.alias_service.resolve_certificate(alias)
-        if certificate is None:
-            self.app.toasts.warning("Сертификат не найден в справочнике. Выполните переиндексацию.")
+        related = self.app.container.alias_service.find_related_certificates(alias, limit=1)
+        if not related:
+            self.app.toasts.warning("Сертификат не найден в базе по текущим данным словаря")
             return
-        self.app.preview_pdf(certificate.path)
+        self.app.preview_pdf(related[0].certificate_number)
 
     def _delete_by_row(self, row_id: str) -> None:
         """Удаляет одну запись (действие контекстного меню строки).
@@ -970,9 +964,6 @@ class AliasesView(BaseView):
             pass
 
 
-def _format_volume(value: float, unit: str) -> str:
-    """Форматирует пару «значение + единица» для списка фильтра объёма."""
-    from app.core.units import UNIT_LABELS
-
-    label = UNIT_LABELS.get(unit, unit)
-    return f"{value:g} {label}"
+def _format_volume(value: float) -> str:
+    """Форматирует значение объёма для списка фильтра."""
+    return f"{value:g} мл"
