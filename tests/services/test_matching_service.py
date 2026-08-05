@@ -98,6 +98,188 @@ class TestAliasStage:
         refreshed = alias_repository.find_for_text("Псевдоним")[0]
         assert refreshed.hit_count == alias.hit_count + 1
 
+    def test_alias_picks_certificate_closest_to_requested_expiry_not_the_original(
+        self,
+        matching_service: MatchingService,
+        certificate_repository: CertificateRepository,
+        alias_repository: AliasRepository,
+    ) -> None:
+        """Псевдоним не привязан намертво к одной позиции — выбор идёт по сроку.
+
+        Один и тот же товар может быть подтверждён несколькими сертификатами
+        (переизданный сертификат, другая партия). Псевдоним был создан по
+        сертификату с датой ``_FUTURE``, но в заказе запрошен срок, который
+        точно совпадает с ДРУГИМ сертификатом того же товара (``_NEAR_FUTURE``)
+        — должен вернуться именно он, а не тот, что был выбран при создании
+        псевдонима.
+        """
+        original = make_certificate(
+            "Лечебные травы 100 мл",
+            "/c/original.pdf",
+            volume_value=100.0,
+            volume_unit="ml",
+            expiry_date=_FUTURE,
+        )
+        renewed = make_certificate(
+            "Лечебные травы 100 мл",
+            "/c/renewed.pdf",
+            volume_value=100.0,
+            volume_unit="ml",
+            expiry_date=_NEAR_FUTURE,
+        )
+        certificate_repository.upsert_many([original, renewed])
+        alias_repository.save(
+            Alias(
+                source_text="TP Herbal 100ml",
+                certificate_id=original.id,
+                target_name=original.product_name,
+            )
+        )
+
+        result = matching_service.match_row(
+            OrderRow(row_number=1, product_name="TP Herbal 100ml", requested_expiry=_NEAR_FUTURE)
+        )
+
+        assert result.alias_applied
+        assert result.certificate is not None
+        assert result.certificate.pdf_path == "/c/renewed.pdf"
+
+    def test_alias_survives_original_certificate_becoming_inactive(
+        self,
+        matching_service: MatchingService,
+        certificate_repository: CertificateRepository,
+        alias_repository: AliasRepository,
+    ) -> None:
+        """Псевдоним переживает исчезновение сертификата, выбранного при его создании.
+
+        Файл, на который изначально ссылался псевдоним, удалён/переиздан
+        (деактивирован), но другой сертификат того же товара остался
+        активным — подбор должен найти именно его.
+        """
+        original = make_certificate(
+            "Лечебные травы 100 мл",
+            "/c/original.pdf",
+            volume_value=100.0,
+            volume_unit="ml",
+            expiry_date=_FUTURE,
+        )
+        certificate_repository.add(original)
+        alias_repository.save(
+            Alias(
+                source_text="TP Herbal 100ml",
+                certificate_id=original.id,
+                target_name=original.product_name,
+            )
+        )
+
+        certificate_repository.deactivate_missing([])  # original.pdf исчез с диска
+        replacement = make_certificate(
+            "Лечебные травы 100 мл",
+            "/c/replacement.pdf",
+            volume_value=100.0,
+            volume_unit="ml",
+            expiry_date=_FUTURE,
+        )
+        certificate_repository.add(replacement)
+
+        result = matching_service.match_row(OrderRow(row_number=1, product_name="TP Herbal 100ml"))
+
+        assert result.alias_applied
+        assert result.certificate is not None
+        assert result.certificate.pdf_path == "/c/replacement.pdf"
+
+    def test_alias_falls_back_to_certificate_id_when_target_name_is_stale(
+        self,
+        matching_service: MatchingService,
+        certificate_repository: CertificateRepository,
+        alias_repository: AliasRepository,
+    ) -> None:
+        """Если target_name больше ничему не соответствует, используется certificate_id."""
+        certificate = make_certificate("Лечебные травы 100 мл", "/c/1.pdf", expiry_date=_FUTURE)
+        certificate_repository.add(certificate)
+        alias_repository.save(
+            Alias(
+                source_text="TP Herbal 100ml",
+                certificate_id=certificate.id,
+                target_name="Устаревшее наименование, которого больше нет в справочнике",
+            )
+        )
+
+        result = matching_service.match_row(OrderRow(row_number=1, product_name="TP Herbal 100ml"))
+
+        assert result.alias_applied
+        assert result.certificate is not None
+        assert result.certificate.pdf_path == "/c/1.pdf"
+
+    def test_alias_skips_expired_certificate_in_favor_of_valid_one(
+        self,
+        matching_service: MatchingService,
+        certificate_repository: CertificateRepository,
+        alias_repository: AliasRepository,
+    ) -> None:
+        """Просроченный сертификат, найденный по данным псевдонима, отбраковывается."""
+        expired = make_certificate(
+            "Лечебные травы 100 мл",
+            "/c/expired.pdf",
+            volume_value=100.0,
+            volume_unit="ml",
+            expiry_date=_PAST,
+        )
+        valid = make_certificate(
+            "Лечебные травы 100 мл",
+            "/c/valid.pdf",
+            volume_value=100.0,
+            volume_unit="ml",
+            expiry_date=_FUTURE,
+        )
+        certificate_repository.upsert_many([expired, valid])
+        alias_repository.save(
+            Alias(
+                source_text="TP Herbal 100ml",
+                certificate_id=expired.id,
+                target_name=expired.product_name,
+            )
+        )
+
+        result = matching_service.match_row(OrderRow(row_number=1, product_name="TP Herbal 100ml"))
+
+        assert result.alias_applied
+        assert result.certificate is not None
+        assert result.certificate.pdf_path == "/c/valid.pdf"
+
+    def test_alias_skips_incompatible_volume_among_same_named_certificates(
+        self,
+        matching_service: MatchingService,
+        certificate_repository: CertificateRepository,
+        alias_repository: AliasRepository,
+    ) -> None:
+        """Среди сертификатов с одинаковым наименованием отбраковывается несовпадающая фасовка.
+
+        В строгом режиме (по умолчанию) сертификат на 200 мл не подтверждает
+        заказанные 100 мл, даже если оба сертификата найдены по одному и тому
+        же псевдониму — как и для обычных кандидатов.
+        """
+        wrong_volume = make_certificate(
+            "Товар Х", "/c/200ml.pdf", volume_value=200.0, volume_unit="ml", expiry_date=_FUTURE
+        )
+        right_volume = make_certificate(
+            "Товар Х", "/c/100ml.pdf", volume_value=100.0, volume_unit="ml", expiry_date=_FUTURE
+        )
+        certificate_repository.upsert_many([wrong_volume, right_volume])
+        alias_repository.save(
+            Alias(
+                source_text="TP Kh 100ml",
+                certificate_id=wrong_volume.id,
+                target_name="Товар Х",
+            )
+        )
+
+        result = matching_service.match_row(OrderRow(row_number=1, product_name="TP Kh 100ml"))
+
+        assert result.alias_applied
+        assert result.certificate is not None
+        assert result.certificate.pdf_path == "/c/100ml.pdf"
+
 
 class TestLexicalStage:
     """Проверки лексического подбора и автоматического принятия решений."""

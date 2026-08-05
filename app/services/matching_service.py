@@ -29,14 +29,9 @@ from app.ai.vector_index import VectorIndex
 from app.config.settings import SettingsService
 from app.core.events import ProgressReporter
 from app.core.text import normalize
+from app.models.alias import Alias
 from app.models.certificate import Certificate
-from app.models.matching import (
-    MatchCandidate,
-    MatchResult,
-    MatchSource,
-    MatchStatus,
-    ScoreBreakdown,
-)
+from app.models.matching import MatchCandidate, MatchResult, MatchSource, MatchStatus
 from app.models.order import OrderRow
 from app.repositories.alias_repository import AliasRepository
 from app.repositories.certificate_repository import CertificateRepository
@@ -257,49 +252,91 @@ class MatchingService:
 
     # ------------------------------------------------------------- этапы
     def _match_by_alias(self, row: OrderRow, context: ScoringContext) -> MatchResult | None:
-        """Этап 1: поиск в таблице псевдонимов."""
+        """Этап 1: поиск в таблице псевдонимов.
+
+        Псевдоним фиксирует наименование/бренд/объём товара, а не одну
+        конкретную позицию сертификата: у одного товара может быть несколько
+        подходящих сертификатов (переизданный сертификат с другим сроком
+        действия, разные партии), и жёсткая привязка к позиции, выбранной в
+        момент создания псевдонима, игнорировала бы более подходящий по
+        сроку вариант. Поэтому по данным псевдонима собираются все
+        действующие сертификаты этого товара, а выбор между ними идёт по
+        тем же правилам, что и для обычных кандидатов (:meth:`_decide`) —
+        в первую очередь по близости к требуемому сроку.
+
+        Args:
+            row: Строка заказа.
+            context: Общий контекст оценки.
+
+        Returns:
+            Результат подбора либо ``None``, если подходящего псевдонима нет.
+        """
         if not context.settings.prefer_alias:
             return None
 
-        aliases = self._aliases.find_for_text(row.search_text)
-        for alias in aliases:
-            if alias.certificate_id is None:
+        for alias in self._aliases.find_for_text(row.search_text):
+            candidates = self._alias_candidates(alias, row, context)
+            if not candidates:
                 continue
-            certificate = self._by_id.get(alias.certificate_id)
-            if certificate is None:
-                certificate = self._certificates.get_by_id(alias.certificate_id)
-                if certificate is None or not certificate.is_active:
-                    continue
 
             if alias.id is not None:
                 self._aliases.register_hit(alias.id)
 
+            result = self._decide(row, candidates)
+            result.alias_applied = True
+            prefix = f"Применён псевдоним «{alias.source_text}»"
+            result.note = f"{prefix} — {result.note}" if result.note else prefix
+            return result
+        return None
+
+    def _alias_candidates(
+        self, alias: Alias, row: OrderRow, context: ScoringContext
+    ) -> list[MatchCandidate]:
+        """Находит и оценивает сертификаты, соответствующие данным псевдонима.
+
+        Наименование считается подтверждённым пользователем (оценка
+        наименования фиксируется в 1.0), а объём и срок оцениваются по
+        факту — чтобы среди нескольких сертификатов одного товара подбор
+        честно выбирал наиболее подходящий по сроку, а не всегда возвращал
+        тот, что был выбран при создании псевдонима.
+
+        Args:
+            alias: Найденный псевдоним.
+            row: Строка заказа.
+            context: Общий контекст оценки.
+
+        Returns:
+            Кандидаты, отсортированные по убыванию итоговой оценки.
+        """
+        key = normalize(alias.target_name) if alias.target_name else ""
+        certificates = list(self._by_normalized.get(key, ())) if key else []
+
+        if not certificates and alias.certificate_id is not None:
+            # Запасной путь для совместимости: наименование в справочнике
+            # могло измениться с момента создания псевдонима (переиндексация,
+            # правка сертификата) — тогда используем сертификат, на который
+            # псевдоним ссылался изначально, если он всё ещё активен.
+            certificate = self._by_id.get(alias.certificate_id)
+            if certificate is None:
+                certificate = self._certificates.get_by_id(alias.certificate_id)
+            if certificate is not None and certificate.is_active:
+                certificates = [certificate]
+
+        candidates: list[MatchCandidate] = []
+        for certificate in certificates:
+            if is_hard_mismatch(row, certificate, context):
+                continue
             breakdown = score_candidate(
                 row, certificate, lexical=1.0, semantic=None, context=context
             )
-            # Псевдоним — подтверждённое человеком решение: итоговая оценка
-            # выставляется в единицу, но детализация сохраняется для отчёта.
-            confirmed = ScoreBreakdown(
-                name=1.0,
-                volume=breakdown.volume,
-                expiry=breakdown.expiry,
-                total=1.0,
-                lexical=1.0,
-                semantic=None,
-                weights=breakdown.weights,
+            candidates.append(
+                MatchCandidate(certificate=certificate, score=breakdown, source=MatchSource.ALIAS)
             )
-            candidate = MatchCandidate(
-                certificate=certificate, score=confirmed, source=MatchSource.ALIAS
-            )
-            return MatchResult(
-                row=row,
-                status=MatchStatus.MATCHED,
-                candidates=[candidate],
-                selected_index=0,
-                alias_applied=True,
-                note=f"Применён псевдоним «{alias.source_text}»",
-            )
-        return None
+
+        candidates.sort(key=_candidate_sort_key, reverse=True)
+        for rank, candidate in enumerate(candidates):
+            candidate.rank = rank
+        return candidates
 
     def _collect_candidates(
         self,
