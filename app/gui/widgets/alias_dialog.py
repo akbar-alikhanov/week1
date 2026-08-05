@@ -52,7 +52,7 @@ class AliasEditDialog(ModalDialog):
             theme,
             title="Изменить соответствие" if editing else "Добавить соответствие",
             width=760,
-            height=640,
+            height=720,
             resizable=True,
         )
         self._search_certificates = search_certificates
@@ -64,9 +64,16 @@ class AliasEditDialog(ModalDialog):
         }
         self._certificate_id = alias.certificate_id if alias else None
 
+        # Кнопки сохранения собираются и занимают своё место ПЕРВЫМИ, до
+        # остального содержимого. В ``pack()`` порядок вызова определяет,
+        # кто первым получает место в контейнере фиксированного размера:
+        # список найденных сертификатов ниже упаковывается с
+        # ``expand=True`` и в противном случае забирал бы себе всю
+        # оставшуюся высоту, не оставляя кнопкам «Сохранить»/«Отмена» ни
+        # пикселя — ровно так и терялась кнопка сохранения раньше.
+        self._build_footer()
         self._build_form()
         self._build_certificate_picker()
-        self._build_footer()
 
         if alias is not None:
             self._render_selected_summary()
@@ -150,17 +157,14 @@ class AliasEditDialog(ModalDialog):
         self._render_empty_results("Введите запрос и нажмите «Найти»")
 
     def _build_footer(self) -> None:
-        """Строит кнопки сохранения и отмены."""
-        theme = self._theme
-        self._error_label = ctk.CTkLabel(
-            self.container,
-            text="",
-            font=theme.font(FontRole.CAPTION),
-            text_color=theme.color("danger"),
-            anchor="w",
-        )
-        self._error_label.pack(fill="x", anchor="w", pady=(Spacing.SM, 0))
+        """Строит кнопки сохранения/отмены и место для сообщения об ошибке.
 
+        Оба виджета закреплены за нижним краем контейнера (``side="bottom"``)
+        и упаковываются в порядке «снизу вверх»: кнопки — первыми, чтобы
+        занять самый нижний ряд, сообщение об ошибке — следом, чтобы
+        оказаться сразу над ними.
+        """
+        theme = self._theme
         buttons = ctk.CTkFrame(self.container, fg_color="transparent", width=0, height=0)
         buttons.pack(fill="x", side="bottom", pady=(Spacing.MD, 0))
 
@@ -168,6 +172,15 @@ class AliasEditDialog(ModalDialog):
         secondary_button(buttons, theme, text="Отмена", command=self.close).pack(
             side="right", padx=(0, Spacing.SM)
         )
+
+        self._error_label = ctk.CTkLabel(
+            self.container,
+            text="",
+            font=theme.font(FontRole.CAPTION),
+            text_color=theme.color("danger"),
+            anchor="w",
+        )
+        self._error_label.pack(fill="x", anchor="w", side="bottom", pady=(Spacing.SM, 0))
 
     # ------------------------------------------------------------- поиск
     def _run_search(self) -> None:

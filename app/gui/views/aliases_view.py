@@ -20,6 +20,7 @@ from app.core.exceptions import DuplicateAliasError
 from app.gui.theme import FontRole, Radius, Spacing
 from app.gui.views.base_view import BaseView
 from app.gui.widgets.alias_dialog import AliasAuditDialog, AliasEditDialog
+from app.gui.widgets.base import focus_in_text_entry
 from app.gui.widgets.card import SectionCard
 from app.gui.widgets.controls import ghost_button, icon_button, secondary_button
 from app.gui.widgets.data_table import Column, DataTable, EmptyState
@@ -925,10 +926,17 @@ class AliasesView(BaseView):
                 pass
 
     def _guard(self, action: Any) -> Any:
-        """Оборачивает обработчик горячей клавиши: не срабатывает поверх модальных окон."""
+        """Оборачивает обработчик горячей клавиши раздела.
+
+        Не срабатывает поверх модальных окон и, что не менее важно, пока
+        фокус ввода находится в текстовом поле (строка поиска, поля формы
+        добавления/редактирования) — иначе, например, Ctrl+Z как рефлекс
+        «отменить» посреди правки текста откатывал бы последнее действие в
+        словаре вместо обычной работы поля ввода.
+        """
 
         def _run(_event: Any = None) -> str | None:
-            if self.app.grab_current() is not None:
+            if self.app.grab_current() is not None or focus_in_text_entry(self.app):
                 return None
             try:
                 action()

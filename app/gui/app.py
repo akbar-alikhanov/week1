@@ -33,6 +33,7 @@ from app.gui.views.dashboard_view import DashboardView
 from app.gui.views.history_view import HistoryView
 from app.gui.views.logs_view import LogsView
 from app.gui.views.settings_view import SettingsView
+from app.gui.widgets.base import focus_in_text_entry
 from app.gui.widgets.dialogs import AboutDialog, ShortcutsDialog, ask_confirmation, show_message
 from app.gui.widgets.sidebar import NavItem, Sidebar
 from app.gui.widgets.toast import ToastManager
@@ -157,27 +158,42 @@ class ApplicationWindow(ctk.CTk):
         self._update_sidebar_status()
 
     def _bind_shortcuts(self) -> None:
-        """Привязывает горячие клавиши."""
-        bindings: dict[str, Callable[[], None]] = {
+        """Привязывает горячие клавиши.
+
+        ``bind_all`` перехватывает нажатия во всём приложении независимо от
+        того, какой виджет активен. Буквенные сочетания (``Ctrl+S`` и
+        подобные) поэтому привязаны через :func:`_guarded_call`, которая
+        пропускает их, пока фокус ввода находится в текстовом поле, — иначе
+        рефлекторное «сохранить» посреди набора текста уводило бы в другой
+        раздел вместо обычного символа. Клавиши, которые не могут быть
+        частью вводимого текста (``F1``, ``F5``, ``Escape``), в такой защите
+        не нуждаются.
+        """
+        guarded: dict[str, Callable[[], None]] = {
             "<Control-o>": lambda: self._dashboard().browse_order(),
             "<Control-d>": lambda: self._dashboard().browse_certificates(),
             "<Control-Return>": lambda: self._dashboard().run_processing(),
-            "<F5>": lambda: self._dashboard().reindex(),
             "<Control-f>": self.focus_search,
             "<Control-t>": self.toggle_theme,
             "<Control-l>": lambda: self.navigate("logs"),
             "<Control-s>": lambda: self.navigate("settings"),
             "<Control-b>": lambda: self.sidebar.toggle_collapse(),
+        }
+        for sequence, handler in guarded.items():
+            self.bind_all(sequence, lambda _, action=handler: _guarded_call(self, action))
+
+        unguarded: dict[str, Callable[[], None]] = {
+            "<F5>": lambda: self._dashboard().reindex(),
             "<F1>": self.show_shortcuts,
             "<Escape>": self._handle_escape,
         }
-        for sequence, handler in bindings.items():
+        for sequence, handler in unguarded.items():
             self.bind_all(sequence, lambda _, action=handler: _safe_call(action))
 
         for index, item in enumerate(NAV_ITEMS, start=1):
             self.bind_all(
                 f"<Control-Key-{index}>",
-                lambda _, key=item.key: self.navigate(key),
+                lambda _, key=item.key: _guarded_call(self, lambda: self.navigate(key)),
             )
 
     def _enable_dnd(self) -> None:
@@ -531,6 +547,31 @@ class ApplicationWindow(ctk.CTk):
 
         _LOGGER.info("Приложение закрыто")
         self.destroy()
+
+
+def _guarded_call(window: ApplicationWindow, action: Callable[[], None]) -> str | None:
+    """Вызывает обработчик буквенной горячей клавиши, если фокус не в поле ввода.
+
+    Без этой проверки, например, ``Ctrl+S`` как рефлекс «сохранить» посреди
+    набора комментария в любом текстовом поле приложения переключал бы раздел
+    на «Настройки» вместо обычного ввода символа.
+
+    Args:
+        window: Главное окно (источник текущего фокуса ввода).
+        action: Обработчик.
+
+    Returns:
+        ``"break"``, если обработчик выполнен; ``None``, если нажатие
+        пропущено ради обычного поведения поля ввода (набор текста, вставка
+        из буфера обмена) — тогда клавиша обрабатывается стандартным образом.
+    """
+    if focus_in_text_entry(window):
+        return None
+    try:
+        action()
+    except Exception:
+        _LOGGER.exception("Ошибка обработчика горячей клавиши")
+    return "break"
 
 
 def _safe_call(action: Callable[[], None]) -> str:
