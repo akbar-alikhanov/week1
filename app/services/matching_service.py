@@ -3,8 +3,14 @@
 Конвейер (порядок этапов задан требованиями и не подлежит изменению без
 пересмотра ожиданий пользователя):
 
-1. **Псевдонимы.** Ранее подтверждённое человеком соответствие. Мгновенно,
-   детерминированно, имеет приоритет над любой эвристикой.
+1. **Псевдонимы.** Словарь соответствий — абсолютный источник истины, а не
+   ещё один канал оценки. Если системное наименование заказа найдено в
+   словаре, все остальные этапы (2–4) для этой строки не выполняются:
+   ни нечёткий, ни семантический поиск, никакая оценка по процентам —
+   наименование и объём берутся из самой записи словаря и ищутся в
+   справочнике строгим равенством; из найденных сертификатов выбирается
+   только ближайший по сроку годности. Ничего не найдено строго —
+   строка считается ненайденной, к следующим этапам она не переходит.
 2. **Точное совпадение** нормализованных наименований.
 3. **Нечёткий поиск** (RapidFuzz) — основной источник кандидатов.
 4. **Семантический поиск** (Sentence Transformers) — подключается, когда
@@ -12,7 +18,8 @@
 5. **Сравнение объёма.**
 6. **Сравнение срока** и выбор ближайшего по сроку из равных кандидатов.
 
-Итоговая оценка — взвешенная сумма трёх составляющих (50/30/20 по умолчанию).
+Итоговая оценка (для этапов 2–6) — взвешенная сумма трёх составляющих
+(50/30/20 по умолчанию); этап псевдонимов в этой оценке не участвует.
 """
 
 from __future__ import annotations
@@ -21,6 +28,7 @@ import logging
 import threading
 import time
 from collections.abc import Sequence
+from datetime import date
 
 from app.ai.embeddings import EmbeddingBackend
 from app.ai.fuzzy import LexicalIndex
@@ -29,7 +37,6 @@ from app.ai.vector_index import VectorIndex
 from app.config.settings import SettingsService
 from app.core.events import ProgressReporter
 from app.core.text import normalize
-from app.core.units import volume_similarity
 from app.models.alias import Alias
 from app.models.certificate import Certificate
 from app.models.matching import (
@@ -259,30 +266,31 @@ class MatchingService:
 
     # ------------------------------------------------------------- этапы
     def _match_by_alias(self, row: OrderRow, context: ScoringContext) -> MatchResult | None:
-        """Этап 1: поиск в таблице псевдонимов.
+        """Этап 1: словарь соответствий — абсолютный источник истины.
 
-        Псевдоним фиксирует наименование и объём товара, а не одну
-        конкретную позицию сертификата: у одного товара может быть несколько
-        подходящих сертификатов (переизданный сертификат с другим сроком
-        действия, разные партии). Поэтому по данным псевдонима строго (без
-        нечёткого допуска) собираются все действующие сертификаты этого
-        товара, а выбор между ними идёт по тем же правилам, что и для
-        обычных кандидатов (:meth:`_decide`) — в первую очередь по близости
-        к требуемому сроку.
+        Если системное наименование заказа найдено в словаре, весь остальной
+        подбор для этой строки не выполняется: ни RapidFuzz, ни Sentence
+        Transformers, ни какая-либо оценка «по процентам» не участвуют.
+        Наименование и объём берутся из самой записи словаря и ищутся в
+        справочнике строгим равенством (:meth:`_alias_strict_matches`) —
+        никаких похожих наименований и допусков. Среди найденных таким
+        образом сертификатов сравнивается только срок годности: выбирается
+        тот, что ближе всего к требуемой дате заказа.
 
-        Если товар в заказе распознан по словарю, но ни один действующий
-        сертификат строго не соответствует зафиксированным в нём
-        наименованию и объёму, строка считается ненайденной — подбор не
-        откатывается к нечёткому/семантическому поиску по всему справочнику
-        (это могло бы подставить другой объём или похожий, но не тот товар,
-        который человек явно закрепил за этим текстом заказа).
+        Если запись словаря для товара есть, а строгий поиск не дал ни
+        одного сертификата, строка считается ненайденной здесь же — подбор
+        не откатывается к нечёткому/семантическому поиску по всему
+        справочнику: это решение человека, алгоритм не должен его подменять
+        похожим, но не тем товаром (другой объём/партия).
 
         Args:
             row: Строка заказа.
             context: Общий контекст оценки.
 
         Returns:
-            Результат подбора либо ``None``, если для строки нет псевдонима.
+            Результат подбора либо ``None``, если для строки нет записи в
+            словаре — тогда управление переходит к обычному конвейеру
+            (:meth:`_collect_candidates`).
         """
         if not context.settings.prefer_alias:
             return None
@@ -291,127 +299,85 @@ class MatchingService:
         if not aliases:
             return None
 
-        for alias in aliases:
-            candidates = self._alias_candidates(alias, row, context)
-            if not candidates:
-                continue
+        alias = aliases[0]
+        if alias.id is not None:
+            self._aliases.register_hit(alias.id)
 
-            if alias.id is not None:
-                self._aliases.register_hit(alias.id)
+        certificates = self._alias_strict_matches(alias, context)
+        if not certificates:
+            detail = alias.target_name or alias.source_text
+            if alias.volume_label:
+                detail += f", {alias.volume_label}"
+            return MatchResult(
+                row=row,
+                status=MatchStatus.NOT_FOUND,
+                alias_applied=True,
+                note=f"Не найден сертификат для товара из словаря: «{detail}»",
+            )
 
-            result = self._decide(row, candidates)
-            result.alias_applied = True
-            prefix = f"Применён псевдоним «{alias.source_text}»"
-            result.note = f"{prefix} — {result.note}" if result.note else prefix
-            return result
-
-        primary = aliases[0]
-        detail = primary.target_name or primary.source_text
-        if primary.volume_label:
-            detail += f", {primary.volume_label}"
+        certificate = _closest_by_expiry(certificates, row.requested_expiry)
+        breakdown = score_candidate(row, certificate, lexical=1.0, semantic=None, context=context)
+        name_weight, volume_weight, expiry_weight = breakdown.weights
+        # Наименование и объём уже подтверждены точным совпадением со
+        # словарём — единственная честная составляющая оценки здесь
+        # (для отчёта, не для выбора) — срок годности.
+        confirmed = ScoreBreakdown(
+            name=1.0,
+            volume=1.0,
+            expiry=breakdown.expiry,
+            total=name_weight + volume_weight + breakdown.expiry * expiry_weight,
+            lexical=1.0,
+            semantic=None,
+            weights=breakdown.weights,
+        )
+        candidate = MatchCandidate(
+            certificate=certificate, score=confirmed, source=MatchSource.ALIAS
+        )
         return MatchResult(
             row=row,
-            status=MatchStatus.NOT_FOUND,
+            status=MatchStatus.MATCHED,
+            candidates=[candidate],
+            selected_index=0,
             alias_applied=True,
-            note=f"В словаре для этого товара указано «{detail}» — подходящего сертификата нет",
+            note=f"Применён псевдоним «{alias.source_text}»",
         )
 
-    def _alias_candidates(
-        self, alias: Alias, row: OrderRow, context: ScoringContext
-    ) -> list[MatchCandidate]:
-        """Находит сертификаты, строго соответствующие данным псевдонима.
+    def _alias_strict_matches(self, alias: Alias, context: ScoringContext) -> list[Certificate]:
+        """Ищет сертификаты строгим равенством наименования и объёма словаря.
 
-        И наименование, и объём берутся из словаря, а не из строки заказа:
-        псевдоним — подтверждённое человеком решение о том, что представляет
-        собой товар, и заказ может называть/оформлять объём иначе (опечатка,
-        сокращение). Сертификат либо совпадает с обоими критериями строго
-        (наименование — точно по нормализованной форме, объём — в пределах
-        обычного допуска на округление), либо не рассматривается вовсе.
-        Единственное, что оценивается по факту, — срок годности: он и решает,
-        какой из нескольких подходящих сертификатов выбрать.
+        Единственные критерии: ``certificate.normalized_name`` совпадает с
+        нормализованной формой ``alias.target_name``, а ``(volume_value,
+        volume_unit)`` сертификата равны тем же полям псевдонима — точно, без
+        допуска на округление и без нечёткого/семантического поиска. Товар
+        без объёма в словаре (оба поля пусты) соответствует только
+        сертификатам, у которых объём тоже не распознан — это тот же
+        буквальный случай равенства, а не особый.
 
         Args:
-            alias: Найденный псевдоним.
-            row: Строка заказа.
-            context: Общий контекст оценки.
+            alias: Запись словаря.
+            context: Общий контекст оценки (нужна дата — отсеять просроченные).
 
         Returns:
-            Кандидаты, отсортированные по убыванию итоговой оценки.
+            Все действующие сертификаты, точно соответствующие записи.
         """
-        settings = context.settings
         key = normalize(alias.target_name) if alias.target_name else ""
-        certificates = list(self._by_normalized.get(key, ())) if key else []
+        if not key:
+            return []
 
-        if not certificates and alias.certificate_id is not None:
-            # Запасной путь для совместимости: наименование в справочнике
-            # могло измениться с момента создания псевдонима (переиндексация,
-            # правка сертификата) — тогда используем сертификат, на который
-            # псевдоним ссылался изначально, если он всё ещё активен.
-            certificate = self._by_id.get(alias.certificate_id)
-            if certificate is None:
-                certificate = self._certificates.get_by_id(alias.certificate_id)
-            if certificate is not None and certificate.is_active:
-                certificates = [certificate]
-
-        alias_volume = alias.volume
-        candidates: list[MatchCandidate] = []
-        for certificate in certificates:
+        settings = context.settings
+        volume_key = (alias.volume_value, alias.volume_unit)
+        matches: list[Certificate] = []
+        for certificate in self._by_normalized.get(key, ()):
+            if (certificate.volume_value, certificate.volume_unit) != volume_key:
+                continue
             if (
                 settings.require_valid_expiry
                 and certificate.expiry_date is not None
                 and certificate.expiry_date < context.reference_date
             ):
                 continue
-
-            if alias_volume is not None:
-                # Объём зафиксирован в словаре — сравнение строгое (в
-                # пределах обычного допуска на округление), и сертификаты
-                # вне него не рассматриваются вовсе.
-                similarity = volume_similarity(
-                    alias_volume,
-                    certificate.volume,
-                    tolerance_ratio=settings.volume_tolerance_ratio,
-                )
-                if similarity < 1.0:
-                    continue
-                volume_score = 1.0
-            else:
-                # Словарь объём не фиксирует (редкий случай — старая запись
-                # или товар без объёма) — сравниваем как обычно, по объёму
-                # из строки заказа.
-                volume_score = volume_similarity(
-                    row.volume,
-                    certificate.volume,
-                    tolerance_ratio=settings.volume_tolerance_ratio,
-                    missing_score=settings.missing_volume_score,
-                )
-
-            breakdown = score_candidate(
-                row, certificate, lexical=1.0, semantic=None, context=context
-            )
-            name_weight, volume_weight, expiry_weight = breakdown.weights
-            # Наименование подтверждено псевдонимом, объём — либо строгим
-            # фильтром выше, либо оценкой по объёму заказа; честной остаётся
-            # только составляющая срока.
-            confirmed = ScoreBreakdown(
-                name=1.0,
-                volume=volume_score,
-                expiry=breakdown.expiry,
-                total=(
-                    name_weight + volume_score * volume_weight + breakdown.expiry * expiry_weight
-                ),
-                lexical=1.0,
-                semantic=None,
-                weights=breakdown.weights,
-            )
-            candidates.append(
-                MatchCandidate(certificate=certificate, score=confirmed, source=MatchSource.ALIAS)
-            )
-
-        candidates.sort(key=_candidate_sort_key, reverse=True)
-        for rank, candidate in enumerate(candidates):
-            candidate.rank = rank
-        return candidates
+            matches.append(certificate)
+        return matches
 
     def _collect_candidates(
         self,
@@ -580,6 +546,36 @@ def _expiry_sort_key(candidate: MatchCandidate) -> tuple[int, int]:
     if expiry is None:
         return (1, 0)
     return (0, expiry.toordinal())
+
+
+def _closest_by_expiry(certificates: list[Certificate], requested: date | None) -> Certificate:
+    """Выбирает сертификат с ближайшим сроком годности среди строго совпавших по словарю.
+
+    С требуемым сроком заказа — минимизирует абсолютную разницу в днях. Без
+    него действует FEFO (first expired, first out): выбирается сертификат,
+    истекающий раньше остальных, — расходуется первым, как и везде в
+    конвейере подбора. Сертификаты без распознанного срока считаются
+    наименее подходящими и рассматриваются в последнюю очередь.
+
+    Args:
+        certificates: Сертификаты, уже прошедшие строгий отбор по словарю
+            (непустой список).
+        requested: Требуемый срок из строки заказа (может отсутствовать).
+
+    Returns:
+        Единственный выбранный сертификат.
+    """
+    if requested is not None:
+        return min(
+            certificates,
+            key=lambda c: (
+                (1, 0) if c.expiry_date is None else (0, abs((c.expiry_date - requested).days))
+            ),
+        )
+    return min(
+        certificates,
+        key=lambda c: (1, 0) if c.expiry_date is None else (0, c.expiry_date.toordinal()),
+    )
 
 
 def _same_product(best: MatchCandidate, rivals: list[MatchCandidate]) -> bool:
