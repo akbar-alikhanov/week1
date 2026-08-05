@@ -242,12 +242,24 @@ def days_between(left: date | None, right: date | None) -> int | None:
     return (left - right).days
 
 
+#: Оценка срока годности на границе допуска (``difference == tolerance_days``)
+#: — сертификат ещё в пределах разрешённого окна, но уже не идеальный.
+_EXPIRY_BOUNDARY_SCORE: Final[float] = 0.85
+
+#: Асимптотический предел оценки при расхождении сроков, стремящемся к
+#: бесконечности. Строго положительный: кандидат за пределами допуска не
+#: должен получать точный ноль и сливаться с другими такими же кандидатами —
+#: иначе при отсутствии совпадений в пределах окна подбор не сможет отличить
+#: «ближайший подходящий» сертификат от произвольного.
+_EXPIRY_FAR_FLOOR: Final[float] = 0.05
+
+
 def expiry_similarity(
     certificate_expiry: date | None,
     requested_expiry: date | None,
     *,
     reference: date | None = None,
-    tolerance_days: int = 180,
+    tolerance_days: int = 45,
     missing_score: float = 0.6,
     expired_score: float = 0.0,
 ) -> float:
@@ -257,7 +269,14 @@ def expiry_similarity(
 
     * сертификат, истёкший на дату обработки, непригоден → ``expired_score``;
     * если в заказе указан требуемый срок, оценка тем выше, чем ближе срок
-      сертификата к требуемому (в пределах ``tolerance_days``);
+      сертификата к требуемому. В пределах ``tolerance_days`` в любую сторону
+      сертификат считается подходящим (оценка плавно снижается от ``1.0`` до
+      ``_EXPIRY_BOUNDARY_SCORE`` к границе окна); дальше окна складской допуск
+      уже не действует, но оценка не обнуляется резко, а продолжает плавно
+      убывать к строго положительному пределу — так подбор всегда может
+      выстроить кандидатов за пределами окна по близости к требуемому сроку
+      и предложить самый близкий, если в окне ничего не нашлось, вместо
+      того чтобы одинаково (нулём) забраковать и близкий, и совсем далёкий;
     * если требуемый срок не указан, предпочитается сертификат с ближайшим
       сроком окончания (принцип FEFO — first expired, first out), при этом
       слишком «короткие» сертификаты не штрафуются, поскольку они валидны.
@@ -267,7 +286,7 @@ def expiry_similarity(
         requested_expiry: Срок, указанный в строке заказа (если есть).
         reference: Дата, относительно которой проверяется валидность
             (по умолчанию — сегодня).
-        tolerance_days: Допустимое расхождение сроков в днях.
+        tolerance_days: Ширина окна допуска в днях (в каждую сторону).
         missing_score: Оценка при отсутствии данных о сроке.
         expired_score: Оценка для просроченного сертификата.
 
@@ -292,9 +311,16 @@ def expiry_similarity(
     difference = abs((certificate_expiry - requested_expiry).days)
     if difference == 0:
         return 1.0
-    if tolerance_days <= 0:
-        return 0.0
-    return max(0.0, 1.0 - difference / (tolerance_days * 2))
+
+    window = max(1, tolerance_days)
+    if difference <= window:
+        return round(1.0 - (1.0 - _EXPIRY_BOUNDARY_SCORE) * (difference / window), 6)
+
+    excess = difference - window
+    decayed = _EXPIRY_FAR_FLOOR + (_EXPIRY_BOUNDARY_SCORE - _EXPIRY_FAR_FLOOR) * (
+        window / (window + excess)
+    )
+    return round(decayed, 6)
 
 
 def format_date(value: date | None, *, fmt: str = "%d.%m.%Y") -> str:

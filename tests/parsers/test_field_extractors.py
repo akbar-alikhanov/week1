@@ -6,6 +6,7 @@ import datetime as dt
 
 from app.parsers.field_extractors import (
     extract_all,
+    extract_appendix_rows,
     extract_certificate_number,
     extract_dates,
     extract_labeled_value,
@@ -144,3 +145,117 @@ class TestExtractAll:
         fields = extract_all(text, filename="183600.pdf")
         assert fields.expiry_date == dt.date(2029, 4, 18)
         assert fields.certificate_number == "183600"
+
+
+#: Текст, воспроизводящий структуру реального приложения к сертификату:
+#: заголовок таблицы, построчные позиции (номер / наименование / срок
+#: годности), а затем блок «Испытания образцов» с датами протоколов —
+#: они оформлены как «...SB-0207-4300/26 2026-\n06-28...», то есть дата
+#: там разорвана переносом строки и не должна приниматься за срок годности.
+_APPENDIX_TEXT = """“Certification Control” mas'uliyati cheklangan jamiyati
+ПРИЛОЖЕНИЕ К СЕРТИФИКАТУ
+Зарегистрирован в Государственном реестре
+29  Июнь   2026 г.
+№
+Наименование
+продукции
+Срок годности
+Количество
+Код ТН ВЭД
+Испытания
+образцов
+Нормативные
+документы
+1
+Зубная паста Colgate
+TOTAL PRO Здоровье
+десен 75мл 48 шт/кор
+2029-02-04
+7728 шт
+3306100000
+O'ZAK.SL.0207 SB-
+0207-4300/26 2026-
+06-28, O'ZAK.SL.0225
+SB-0225-2798/26
+2026-06-25,
+O'ZAK.SL.0318 SB-
+0318-6259/26 2026-
+06-26
+ГОСТ 7983-2016
+2
+Зубная паста
+COLGATE Total12
+Профессиональная
+чистка, гель 75мл
+SRP 48 шт/кор
+2029-02-07
+576 шт
+3306100000
+O'ZAK.SL.0207 SB-
+0207-4298/26 2026-
+06-28
+ГОСТ 7983-2016
+3
+Зубная паста Colgate
+Optic White Sparkl
+75мл 48 шт/кор
+2029-02-21
+4368 шт
+3306100000
+O'ZAK.SL.0207 SB-
+0207-4297/26 2026-
+06-28
+ГОСТ 7983-2016
+"""
+
+
+class TestExtractAppendixRows:
+    """Проверки разбора таблицы «Приложение к сертификату»."""
+
+    def test_extracts_all_rows_in_order(self) -> None:
+        """Каждая позиция таблицы становится отдельной строкой результата."""
+        rows = extract_appendix_rows(_APPENDIX_TEXT)
+        assert [row.row_index for row in rows] == [1, 2, 3]
+
+    def test_product_name_spans_multiple_lines(self) -> None:
+        """Наименование, перенесённое на несколько строк, склеивается в одно."""
+        rows = extract_appendix_rows(_APPENDIX_TEXT)
+        assert (
+            rows[0].product_name == "Зубная паста Colgate TOTAL PRO Здоровье десен 75мл 48 шт/кор"
+        )
+
+    def test_expiry_date_is_the_one_right_after_the_name(self) -> None:
+        """Срок годности берётся из даты сразу после наименования, а не из блока испытаний."""
+        rows = extract_appendix_rows(_APPENDIX_TEXT)
+        assert rows[0].expiry_date == dt.date(2029, 2, 4)
+        assert rows[1].expiry_date == dt.date(2029, 2, 7)
+        assert rows[2].expiry_date == dt.date(2029, 2, 21)
+
+    def test_dates_broken_across_lines_in_testing_block_are_ignored(self) -> None:
+        """Даты протоколов испытаний, разорванные переносом строки, не путаются со сроком.
+
+        В исходном тексте фрагмент «2026-\\n06-28» разорван переносом и не
+        является строкой, целиком равной формату ГГГГ-ММ-ДД — поэтому он не
+        должен быть принят за срок годности следующей позиции.
+        """
+        rows = extract_appendix_rows(_APPENDIX_TEXT)
+        assert all(row.expiry_date.year == 2029 for row in rows)
+
+    def test_no_marker_returns_empty_list(self) -> None:
+        """Текст без заголовка приложения не считается таблицей позиций."""
+        assert extract_appendix_rows(_SAMPLE_TEXT) == []
+
+    def test_empty_text_returns_empty_list(self) -> None:
+        """Пустой текст не вызывает ошибок и не даёт позиций."""
+        assert extract_appendix_rows("") == []
+
+    def test_row_with_missing_date_is_skipped_without_breaking_sequence(self) -> None:
+        """Позиция без срока годности пропускается, не обрывая разбор остальных."""
+        text = (
+            "ПРИЛОЖЕНИЕ К СЕРТИФИКАТУ\n"
+            "1\nТовар без срока годности\nещё текст без даты\n\n"
+            "2\nТовар со сроком\n2029-05-01\n"
+        )
+        rows = extract_appendix_rows(text, max_name_lines=3)
+        assert [row.row_index for row in rows] == [2]
+        assert rows[0].product_name == "Товар со сроком"

@@ -199,7 +199,7 @@ class CertificateWatcher:
             if not path.exists():
                 continue
             try:
-                if self._indexing.index_single_file(path) is not None:
+                if self._indexing.index_single_file(path):
                     indexed += 1
             except Exception:
                 _LOGGER.exception("Ошибка индексации файла %s", path)

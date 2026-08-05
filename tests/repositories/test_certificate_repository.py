@@ -51,6 +51,56 @@ class TestUpsert:
         assert fetched is not None
         assert fetched.product_name == "Новое имя"
 
+    def test_upsert_many_keys_by_path_and_row_index(
+        self, certificate_repository: CertificateRepository
+    ) -> None:
+        """Один файл с несколькими позициями приложения даёт несколько записей."""
+        rows = [make_certificate(f"Позиция {i}", "/c/appendix.pdf", row_index=i) for i in range(3)]
+        added, updated = certificate_repository.upsert_many(rows)
+        assert (added, updated) == (3, 0)
+        assert certificate_repository.count("pdf_path = '/c/appendix.pdf'") == 3
+
+        # Повторная индексация того же файла с тем же числом позиций обновляет
+        # все три записи, не создавая дублей.
+        again = [
+            make_certificate(f"Позиция {i} (обновлена)", "/c/appendix.pdf", row_index=i)
+            for i in range(3)
+        ]
+        added, updated = certificate_repository.upsert_many(again)
+        assert (added, updated) == (0, 3)
+        assert certificate_repository.count("pdf_path = '/c/appendix.pdf'") == 3
+
+    def test_upsert_many_removes_stale_rows_when_appendix_shrinks(
+        self, certificate_repository: CertificateRepository
+    ) -> None:
+        """Позиции, пропавшие при переиндексации файла, удаляются из справочника."""
+        initial = [
+            make_certificate(f"Позиция {i}", "/c/appendix.pdf", row_index=i) for i in range(5)
+        ]
+        certificate_repository.upsert_many(initial)
+        assert certificate_repository.count("pdf_path = '/c/appendix.pdf'") == 5
+
+        shrunk = [
+            make_certificate(f"Позиция {i}", "/c/appendix.pdf", row_index=i) for i in range(2)
+        ]
+        added, updated = certificate_repository.upsert_many(shrunk)
+        assert (added, updated) == (0, 2)
+        assert certificate_repository.count("pdf_path = '/c/appendix.pdf'") == 2
+
+    def test_upsert_many_does_not_cross_contaminate_paths(
+        self, certificate_repository: CertificateRepository
+    ) -> None:
+        """Позиции с одинаковым row_index, но разными файлами не путаются."""
+        rows = [
+            make_certificate("A0", "/c/a.pdf", row_index=0),
+            make_certificate("A1", "/c/a.pdf", row_index=1),
+            make_certificate("B0", "/c/b.pdf", row_index=0),
+        ]
+        added, updated = certificate_repository.upsert_many(rows)
+        assert (added, updated) == (3, 0)
+        assert certificate_repository.count("pdf_path = '/c/a.pdf'") == 2
+        assert certificate_repository.count("pdf_path = '/c/b.pdf'") == 1
+
 
 class TestQueries:
     """Проверки чтения справочника."""
@@ -65,6 +115,36 @@ class TestQueries:
     def test_get_by_path_missing(self, certificate_repository: CertificateRepository) -> None:
         """Несуществующий путь даёт None."""
         assert certificate_repository.get_by_path("/c/missing.pdf") is None
+
+    def test_get_by_path_returns_anchor_row_for_appendix_file(
+        self, certificate_repository: CertificateRepository
+    ) -> None:
+        """Для файла с приложением get_by_path отдаёт позицию row_index = 0."""
+        certificate_repository.upsert_many(
+            [
+                make_certificate("Позиция 0", "/c/appendix.pdf", row_index=0),
+                make_certificate("Позиция 1", "/c/appendix.pdf", row_index=1),
+            ]
+        )
+        found = certificate_repository.get_by_path("/c/appendix.pdf")
+        assert found is not None
+        assert found.row_index == 0
+        assert found.product_name == "Позиция 0"
+
+    def test_get_all_by_path_returns_every_row(
+        self, certificate_repository: CertificateRepository
+    ) -> None:
+        """get_all_by_path возвращает все позиции файла по порядку."""
+        certificate_repository.upsert_many(
+            [
+                make_certificate("Позиция 1", "/c/appendix.pdf", row_index=1),
+                make_certificate("Позиция 0", "/c/appendix.pdf", row_index=0),
+                make_certificate("Позиция 2", "/c/appendix.pdf", row_index=2),
+            ]
+        )
+        found = certificate_repository.get_all_by_path("/c/appendix.pdf")
+        assert [c.row_index for c in found] == [0, 1, 2]
+        assert [c.product_name for c in found] == ["Позиция 0", "Позиция 1", "Позиция 2"]
 
     def test_list_active_excludes_inactive(
         self, certificate_repository: CertificateRepository
@@ -131,6 +211,19 @@ class TestFingerprints:
         assert fingerprints["/c/1.pdf"].file_hash == "abc123"
         assert fingerprints["/c/1.pdf"].file_size == 1024
 
+    def test_fingerprints_one_entry_per_appendix_file(
+        self, certificate_repository: CertificateRepository
+    ) -> None:
+        """Файл с несколькими позициями всё равно даёт один отпечаток."""
+        rows = [make_certificate(f"Позиция {i}", "/c/appendix.pdf", row_index=i) for i in range(4)]
+        for row in rows:
+            row.file_hash = "shared-hash"
+        certificate_repository.upsert_many(rows)
+
+        fingerprints = certificate_repository.fingerprints()
+        assert list(fingerprints.keys()) == ["/c/appendix.pdf"]
+        assert fingerprints["/c/appendix.pdf"].file_hash == "shared-hash"
+
     def test_deactivate_missing(self, certificate_repository: CertificateRepository) -> None:
         """Файлы, отсутствующие среди найденных, помечаются неактивными."""
         certificate_repository.add(make_certificate("Есть", "/c/present.pdf"))
@@ -139,6 +232,30 @@ class TestFingerprints:
         removed = certificate_repository.deactivate_missing(["/c/present.pdf"])
         assert removed == 1
         assert certificate_repository.count("is_active = 1") == 1
+
+    def test_deactivate_missing_covers_every_row_of_appendix_file(
+        self, certificate_repository: CertificateRepository
+    ) -> None:
+        """Пропавший файл с несколькими позициями деактивируется целиком.
+
+        Регрессия: группировка по пути в словаре «путь → id» может схлопнуть
+        несколько позиций одного файла в один произвольный идентификатор —
+        тогда деактивировалась бы только одна из них, а остальные ошибочно
+        оставались бы активными.
+        """
+        certificate_repository.upsert_many(
+            [
+                make_certificate("Позиция 0", "/c/gone.pdf", row_index=0),
+                make_certificate("Позиция 1", "/c/gone.pdf", row_index=1),
+                make_certificate("Позиция 2", "/c/gone.pdf", row_index=2),
+            ]
+        )
+        certificate_repository.add(make_certificate("Остаётся", "/c/present.pdf"))
+
+        removed = certificate_repository.deactivate_missing(["/c/present.pdf"])
+        assert removed == 3
+        assert certificate_repository.count("is_active = 1") == 1
+        assert certificate_repository.count("pdf_path = '/c/gone.pdf' AND is_active = 1") == 0
 
 
 class TestStatistics:

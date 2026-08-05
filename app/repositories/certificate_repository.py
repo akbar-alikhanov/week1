@@ -99,10 +99,15 @@ class CertificateRepository(BaseRepository[Certificate]):
     def upsert_many(self, certificates: Sequence[Certificate]) -> tuple[int, int]:
         """Массово добавляет или обновляет сертификаты за одну транзакцию.
 
-        Ключом служит ``pdf_path``: он уникален и стабилен между запусками.
+        Ключом служит пара ``(pdf_path, row_index)``: один файл может дать
+        несколько позиций (таблица «Приложение к сертификату»), и при
+        переиндексации их количество может измениться — позиции, пропавшие
+        из свежего разбора файла, удаляются (связанные псевдонимы уходят
+        вместе с ними по ``ON DELETE CASCADE``).
 
         Args:
-            certificates: Сохраняемые сертификаты.
+            certificates: Сохраняемые сертификаты (могут относиться к
+                нескольким файлам за один вызов).
 
         Returns:
             Пара ``(добавлено, обновлено)``.
@@ -113,16 +118,21 @@ class CertificateRepository(BaseRepository[Certificate]):
         added = 0
         updated = 0
         with self._db.transaction(exclusive=True) as connection:
-            placeholders = ", ".join("?" for _ in certificates)
+            paths = {certificate.pdf_path for certificate in certificates}
+            placeholders = ", ".join("?" for _ in paths)
             existing = {
-                str(row["pdf_path"]): int(row["id"])
+                (str(row["pdf_path"]), int(row["row_index"])): int(row["id"])
                 for row in connection.execute(
-                    f"SELECT id, pdf_path FROM certificates WHERE pdf_path IN ({placeholders})",
-                    [certificate.pdf_path for certificate in certificates],
+                    f"SELECT id, pdf_path, row_index FROM certificates "
+                    f"WHERE pdf_path IN ({placeholders})",
+                    list(paths),
                 )
             }
+            seen: set[tuple[str, int]] = set()
             for certificate in certificates:
-                row_id = existing.get(certificate.pdf_path)
+                key = (certificate.pdf_path, certificate.row_index)
+                seen.add(key)
+                row_id = existing.get(key)
                 if row_id is None:
                     certificate.id = self._insert(connection, certificate.to_row())
                     added += 1
@@ -136,37 +146,60 @@ class CertificateRepository(BaseRepository[Certificate]):
                         parameters={"row_id": row_id},
                     )
                     updated += 1
-        _LOGGER.debug("Сохранено сертификатов: добавлено %s, обновлено %s", added, updated)
+
+            stale_ids = [row_id for key, row_id in existing.items() if key not in seen]
+            if stale_ids:
+                stale_placeholders = ", ".join("?" for _ in stale_ids)
+                connection.execute(
+                    f"DELETE FROM certificates WHERE id IN ({stale_placeholders})", stale_ids
+                )
+
+        _LOGGER.debug(
+            "Сохранено сертификатов: добавлено %s, обновлено %s, удалено устаревших позиций %s",
+            added,
+            updated,
+            len(stale_ids),
+        )
         return (added, updated)
 
     def deactivate_missing(self, existing_paths: Iterable[str]) -> int:
         """Помечает неактивными записи, файлы которых исчезли с диска.
 
         Записи не удаляются: на них могут ссылаться псевдонимы и история.
+        Деактивация идёт по пути файла — один файл может дать несколько
+        позиций таблицы приложения, и все они должны деактивироваться вместе
+        (группировка по ``id`` здесь недопустима: словарь «путь → id» схлопнул
+        бы несколько позиций одного файла в один произвольный идентификатор).
 
         Args:
             existing_paths: Пути файлов, найденных при сканировании.
 
         Returns:
-            Количество деактивированных записей.
+            Количество деактивированных записей (позиций, не файлов).
         """
         paths = set(existing_paths)
         with self._db.transaction(exclusive=True) as connection:
-            stored = {
-                str(row["pdf_path"]): int(row["id"])
+            stored_paths = {
+                str(row["pdf_path"])
                 for row in connection.execute(
-                    "SELECT id, pdf_path FROM certificates WHERE is_active = 1"
+                    "SELECT DISTINCT pdf_path FROM certificates WHERE is_active = 1"
                 )
             }
-            missing = [row_id for path, row_id in stored.items() if path not in paths]
-            for row_id in missing:
-                connection.execute(
-                    "UPDATE certificates SET is_active = 0, updated_at = ? WHERE id = ?",
-                    (datetime.now().isoformat(timespec="seconds"), row_id),
+            missing_paths = stored_paths - paths
+            count = 0
+            now = datetime.now().isoformat(timespec="seconds")
+            for path in missing_paths:
+                cursor = connection.execute(
+                    "UPDATE certificates SET is_active = 0, updated_at = ? "
+                    "WHERE pdf_path = ? AND is_active = 1",
+                    (now, path),
                 )
-        if missing:
-            _LOGGER.info("Помечено отсутствующими сертификатов: %s", len(missing))
-        return len(missing)
+                count += cursor.rowcount
+        if count:
+            _LOGGER.info(
+                "Помечено отсутствующими сертификатов: %s (файлов: %s)", count, len(missing_paths)
+            )
+        return count
 
     def delete_by_path(self, pdf_path: str) -> bool:
         """Удаляет сертификат по пути к файлу.
@@ -194,7 +227,12 @@ class CertificateRepository(BaseRepository[Certificate]):
         return self._to_model(row) if row else None
 
     def get_by_path(self, pdf_path: str) -> Certificate | None:
-        """Возвращает сертификат по пути к PDF-файлу.
+        """Возвращает первую позицию сертификата по пути к PDF-файлу.
+
+        Файл с таблицей приложения даёт несколько записей — эта функция
+        возвращает опорную (``row_index = 0`` для файлов без приложения,
+        первая позиция таблицы для остальных). Чтобы получить все позиции
+        файла, используйте :meth:`get_all_by_path`.
 
         Args:
             pdf_path: Полный путь к файлу.
@@ -202,8 +240,24 @@ class CertificateRepository(BaseRepository[Certificate]):
         Returns:
             Сертификат либо ``None``.
         """
-        row = self._db.query_one("SELECT * FROM certificates WHERE pdf_path = ?", (pdf_path,))
+        row = self._db.query_one(
+            "SELECT * FROM certificates WHERE pdf_path = ? ORDER BY row_index LIMIT 1", (pdf_path,)
+        )
         return self._to_model(row) if row else None
+
+    def get_all_by_path(self, pdf_path: str) -> list[Certificate]:
+        """Возвращает все позиции сертификата по пути к PDF-файлу.
+
+        Args:
+            pdf_path: Полный путь к файлу.
+
+        Returns:
+            Список позиций в порядке следования в приложении к сертификату.
+        """
+        rows = self._db.query_all(
+            "SELECT * FROM certificates WHERE pdf_path = ? ORDER BY row_index", (pdf_path,)
+        )
+        return self._rows_to_models(rows)
 
     def get_many(self, identifiers: Sequence[int]) -> list[Certificate]:
         """Возвращает сертификаты по списку идентификаторов.
@@ -282,13 +336,18 @@ class CertificateRepository(BaseRepository[Certificate]):
         """Возвращает отпечатки всех проиндексированных файлов.
 
         Один запрос вместо тысяч точечных проверок — основа быстрой
-        инкрементальной индексации.
+        инкрементальной индексации. Отпечаток файловый, а не построчный —
+        каждый проиндексированный файл всегда даёт ровно одну запись с
+        ``row_index = 0`` (первая позиция таблицы приложения либо
+        единственная позиция файла без приложения), поэтому фильтр по ней
+        не теряет ни одного файла.
 
         Returns:
             Отображение «путь к файлу → отпечаток».
         """
         rows = self._db.query_all(
-            "SELECT id, pdf_path, file_hash, file_size, file_mtime FROM certificates"
+            "SELECT id, pdf_path, file_hash, file_size, file_mtime FROM certificates "
+            "WHERE row_index = 0"
         )
         return {
             str(row["pdf_path"]): FileFingerprint(

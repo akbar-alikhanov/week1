@@ -77,6 +77,7 @@ def make_certificate(
     expiry_date: dt.date | None = None,
     certificate_number: str = "",
     brand: str = "",
+    row_index: int = 0,
 ) -> Certificate:
     """Создаёт сертификат для использования в тестах.
 
@@ -88,6 +89,9 @@ def make_certificate(
         expiry_date: Срок действия.
         certificate_number: Номер сертификата.
         brand: Торговая марка.
+        row_index: Порядковый номер позиции внутри приложения к сертификату
+            (несколько записей с одним ``pdf_path`` и разными ``row_index``
+            имитируют файл с таблицей приложения).
 
     Returns:
         Заполненный объект :class:`Certificate`.
@@ -100,4 +104,5 @@ def make_certificate(
         expiry_date=expiry_date,
         certificate_number=certificate_number,
         brand=brand,
+        row_index=row_index,
     )

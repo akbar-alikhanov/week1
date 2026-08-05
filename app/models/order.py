@@ -2,13 +2,43 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
-from app.core.text import alpha_signature, normalize, token_key, transliterate
+from app.core.text import alpha_signature, collapse_whitespace, normalize, token_key, transliterate
 from app.core.units import Volume, extract_primary_volume
+
+#: Код товара в начале системного наименования: «61004628 TP Dr Rabbit...».
+#: Сертификаты такого кода не содержат, поэтому для подбора он лишний шум.
+_RE_LEADING_CODE: Final[re.Pattern[str]] = re.compile(r"^\s*\d{4,}\s+")
+
+#: Количество в коробке в конце наименования: «...50ml [48]». Как и код
+#: товара, в тексте сертификата этой отметки нет.
+_RE_TRAILING_BRACKETS: Final[re.Pattern[str]] = re.compile(r"(?:\s*\[[^\]]*\]\s*)+$")
+
+
+def _clean_search_name(product_name: str) -> str:
+    """Убирает код товара и отметку «[кол-во в коробке]» для подбора.
+
+    Системное наименование в заказе оформлено как «61004628 TP Dr Rabbit
+    Kids Bubblegum 50ml [48]»: числовой код товара спереди и количество в
+    коробке в квадратных скобках в конце — ни того, ни другого нет в тексте
+    сертификата, и код вдобавок мог бы перевесить совпадение по смыслу при
+    нечётком и семантическом сравнении. ``product_name`` при этом не
+    меняется — он остаётся как в исходном файле для отчёта.
+
+    Args:
+        product_name: Наименование товара как в файле заказа.
+
+    Returns:
+        Наименование без кода товара и отметки количества в коробке.
+    """
+    text = _RE_LEADING_CODE.sub("", product_name)
+    text = _RE_TRAILING_BRACKETS.sub("", text)
+    return collapse_whitespace(text)
 
 
 @dataclass(slots=True)
@@ -57,12 +87,15 @@ class OrderRow:
     def search_text(self) -> str:
         """Текст, используемый для подбора.
 
-        Если объём вынесен в отдельную колонку заказа, он приклеивается к
-        наименованию — иначе алгоритм не сможет отличить 100 мл от 150 мл.
+        Наименование сперва очищается от кода товара и отметки количества в
+        коробке (см. :func:`_clean_search_name`). Если объём вынесен в
+        отдельную колонку заказа, он приклеивается к очищенному наименованию
+        — иначе алгоритм не сможет отличить 100 мл от 150 мл.
         """
-        if self.declared_volume and self.declared_volume.lower() not in self.product_name.lower():
-            return f"{self.product_name} {self.declared_volume}".strip()
-        return self.product_name
+        core = _clean_search_name(self.product_name)
+        if self.declared_volume and self.declared_volume.lower() not in core.lower():
+            return f"{core} {self.declared_volume}".strip()
+        return core
 
     @property
     def volume(self) -> Volume | None:

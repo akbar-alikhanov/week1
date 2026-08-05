@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import itertools
 
 import pytest
 
@@ -178,15 +179,94 @@ class TestExpirySimilarity:
         )
         assert score == pytest.approx(1.0)
 
-    def test_far_from_requested_scores_low(self) -> None:
-        """Большое расхождение с требуемым сроком снижает оценку."""
+    def test_far_from_requested_scores_low_but_not_zero(self) -> None:
+        """Большое расхождение с требуемым сроком сильно снижает оценку, но не до нуля.
+
+        Не обнуляем намеренно: если ни один сертификат не попал в окно
+        допуска, подбор должен уметь выбрать «ближайший подходящий» вариант
+        среди кандидатов, а не увидеть у всех одинаковый ноль.
+        """
         score = expiry_similarity(
             dt.date(2029, 1, 1),
             dt.date(2026, 1, 1),
             reference=dt.date(2025, 1, 1),
             tolerance_days=180,
         )
-        assert score == pytest.approx(0.0)
+        assert 0.0 < score < 0.3
+
+    def test_within_tolerance_window_scores_high(self) -> None:
+        """Срок в пределах окна допуска получает высокую, но не максимальную оценку."""
+        score = expiry_similarity(
+            dt.date(2026, 6, 20),  # +19 дней от требуемого
+            dt.date(2026, 6, 1),
+            reference=dt.date(2025, 1, 1),
+            tolerance_days=45,
+        )
+        assert 0.85 < score < 1.0
+
+    def test_exact_tolerance_boundary(self) -> None:
+        """На границе окна (ровно tolerance_days) оценка равна 0.85 в обе стороны."""
+        before = expiry_similarity(
+            dt.date(2026, 4, 17),  # -45 дней
+            dt.date(2026, 6, 1),
+            reference=dt.date(2025, 1, 1),
+            tolerance_days=45,
+        )
+        after = expiry_similarity(
+            dt.date(2026, 7, 16),  # +45 дней
+            dt.date(2026, 6, 1),
+            reference=dt.date(2025, 1, 1),
+            tolerance_days=45,
+        )
+        assert before == pytest.approx(0.85)
+        assert after == pytest.approx(0.85)
+
+    def test_score_never_reaches_zero_for_a_valid_certificate(self) -> None:
+        """Даже огромное расхождение не обнуляет оценку действующего сертификата."""
+        score = expiry_similarity(
+            dt.date(2099, 1, 1),
+            dt.date(2026, 6, 1),
+            reference=dt.date(2025, 1, 1),
+            tolerance_days=45,
+        )
+        assert score > 0.0
+
+    def test_closer_out_of_window_certificate_still_ranks_higher(self) -> None:
+        """За пределами окна допуска более близкий срок всё равно оценивается выше.
+
+        Прямая проверка требования «если в пределах ±45 дней ничего не
+        нашлось — предложить сертификаты с наиболее близким сроком»: чтобы
+        подбор мог ранжировать кандидатов по близости, их оценки не должны
+        совпадать (что происходило бы при жёстком обнулении за окном).
+        """
+        requested = dt.date(2026, 6, 1)
+        closer = expiry_similarity(
+            dt.date(2026, 9, 1),
+            requested,
+            reference=dt.date(2025, 1, 1),
+            tolerance_days=45,
+        )
+        farther = expiry_similarity(
+            dt.date(2027, 6, 1),
+            requested,
+            reference=dt.date(2025, 1, 1),
+            tolerance_days=45,
+        )
+        assert closer > farther > 0.0
+
+    def test_score_is_monotonic_in_distance(self) -> None:
+        """Оценка убывает монотонно с ростом расхождения — окно и «хвост» без разрывов."""
+        requested = dt.date(2026, 6, 1)
+        scores = [
+            expiry_similarity(
+                requested + dt.timedelta(days=diff),
+                requested,
+                reference=dt.date(2025, 1, 1),
+                tolerance_days=45,
+            )
+            for diff in range(0, 400)
+        ]
+        assert all(earlier >= later for earlier, later in itertools.pairwise(scores))
 
     def test_fefo_prefers_nearer_expiry(self) -> None:
         """Без требуемого срока действует принцип FEFO: ближе срок — выше оценка."""

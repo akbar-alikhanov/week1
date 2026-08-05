@@ -180,28 +180,29 @@ class IndexingService:
         self._events.publish(AppEvent.INDEX_FINISHED, result=result)
         return result
 
-    def index_single_file(self, path: Path) -> Certificate | None:
+    def index_single_file(self, path: Path) -> list[Certificate]:
         """Индексирует один файл (используется наблюдателем за папкой).
 
         Args:
             path: Путь к PDF-файлу.
 
         Returns:
-            Сохранённый сертификат либо ``None`` при ошибке разбора.
+            Сохранённые сертификаты (одна или несколько позиций таблицы
+            приложения); пустой список при ошибке разбора.
         """
         if not path.exists() or path.suffix.lower() not in PDF_EXTENSIONS:
-            return None
+            return []
         parser = PdfParser(max_pages=self._settings.current.indexing.max_pages)
         try:
-            certificate = parser.parse(path)
+            certificates = parser.parse(path)
         except PdfParsingError as error:
             _LOGGER.warning("Файл %s не проиндексирован: %s", path.name, error.message)
-            return None
+            return []
 
-        self._certificates.upsert_many([certificate])
-        self._events.publish(AppEvent.INDEX_FILE_ADDED, certificate=certificate)
-        _LOGGER.info("Проиндексирован новый файл: %s", path.name)
-        return certificate
+        self._certificates.upsert_many(certificates)
+        self._events.publish(AppEvent.INDEX_FILE_ADDED, certificates=certificates)
+        _LOGGER.info("Проиндексирован новый файл: %s (позиций: %s)", path.name, len(certificates))
+        return certificates
 
     def remove_file(self, path: Path) -> bool:
         """Удаляет запись о файле, исчезнувшем из папки.
@@ -297,7 +298,7 @@ class IndexingService:
             batch = []
 
         with ManagedThreadPool(workers, name="index") as pool:
-            for path, certificate, error in pool.map_unordered(
+            for path, certificates, error in pool.map_unordered(
                 parser.parse, files, chunk_size=workers * 8
             ):
                 if reporter is not None:
@@ -309,8 +310,8 @@ class IndexingService:
                     message = getattr(error, "message", str(error))
                     errors.append((path.name, message))
                     _LOGGER.warning("Ошибка разбора %s: %s", path.name, message)
-                elif certificate is not None:
-                    batch.append(certificate)
+                elif certificates is not None:
+                    batch.extend(certificates)
                     if len(batch) >= DB_BATCH_SIZE:
                         _flush()
 

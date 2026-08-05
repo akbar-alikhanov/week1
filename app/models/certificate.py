@@ -21,6 +21,13 @@ class Certificate:
     (``normalized_name``, ``translit_name``, ``name_signature``) вычисляются
     один раз при индексации, поэтому подбор не тратит время на нормализацию.
 
+    Один PDF-файл на практике удостоверяет не один товар, а таблицу из
+    десятков позиций («приложение к сертификату»), каждая — со своим
+    наименованием и сроком годности. Такой файл даёт несколько экземпляров
+    :class:`Certificate` с одинаковыми ``pdf_path``/``certificate_number``,
+    но разными ``product_name``/``expiry_date``/``row_index`` — именно пара
+    ``(pdf_path, row_index)``, а не один ``pdf_path``, уникальна в базе.
+
     Attributes:
         id: Первичный ключ в базе (``None`` до сохранения).
         product_name: Наименование товара, как в сертификате.
@@ -41,6 +48,8 @@ class Certificate:
         volume_unit: Базовая единица (``ml``, ``g``, ``pcs``).
         volume_raw: Исходный фрагмент текста с объёмом.
         pack_count: Количество единиц в упаковке.
+        row_index: Порядковый номер позиции внутри приложения к сертификату
+            (``0`` для сертификатов без приложения — единственная позиция).
         pdf_name: Имя PDF-файла.
         pdf_path: Полный путь к PDF-файлу.
         page_count: Количество страниц в PDF.
@@ -75,6 +84,7 @@ class Certificate:
     volume_unit: str = ""
     volume_raw: str = ""
     pack_count: int = 1
+    row_index: int = 0
     page_count: int = 0
     file_hash: str = ""
     file_size: int = 0
@@ -184,6 +194,7 @@ class Certificate:
             "volume_unit": self.volume_unit,
             "volume_raw": self.volume_raw,
             "pack_count": self.pack_count,
+            "row_index": self.row_index,
             "pdf_name": self.pdf_name,
             "pdf_path": self.pdf_path,
             "page_count": self.page_count,
@@ -228,6 +239,7 @@ class Certificate:
             volume_unit=data.get("volume_unit") or "",
             volume_raw=data.get("volume_raw") or "",
             pack_count=int(data.get("pack_count") or 1),
+            row_index=int(data.get("row_index") or 0),
             pdf_name=data.get("pdf_name") or "",
             pdf_path=data.get("pdf_path") or "",
             page_count=int(data.get("page_count") or 0),

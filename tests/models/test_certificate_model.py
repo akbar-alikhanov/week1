@@ -91,6 +91,7 @@ class TestRowRoundtrip:
             expiry_date=dt.date(2029, 3, 22),
             volume_value=100.0,
             volume_unit="ml",
+            row_index=3,
         )
         row = original.to_row()
         restored = Certificate.from_row(row)
@@ -100,3 +101,12 @@ class TestRowRoundtrip:
         assert restored.certificate_number == original.certificate_number
         assert restored.expiry_date == original.expiry_date
         assert restored.volume_value == original.volume_value
+        assert restored.row_index == 3
+
+    def test_from_row_defaults_row_index_to_zero_when_absent(self) -> None:
+        """Строка без колонки row_index (старые данные) восстанавливается с индексом 0."""
+        original = Certificate(product_name="Товар", pdf_path="/c/1.pdf")
+        row = original.to_row()
+        del row["row_index"]
+        restored = Certificate.from_row(row)
+        assert restored.row_index == 0

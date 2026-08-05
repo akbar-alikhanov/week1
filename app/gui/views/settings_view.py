@@ -300,10 +300,10 @@ class SettingsView(BaseView):
         self._slider_row(
             card.content,
             "Страниц PDF для разбора",
-            "Сертификаты редко длиннее двух страниц",
+            "Таблица товарных позиций может занимать десятки страниц",
             float(indexing.max_pages),
             1.0,
-            20.0,
+            500.0,
             lambda value: self._set("indexing", "max_pages", int(value)),
             fmt=lambda value: f"{int(value)}",
         )

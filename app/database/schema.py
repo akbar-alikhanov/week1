@@ -283,6 +283,94 @@ def _migration_002_alias_manager(connection: sqlite3.Connection) -> None:
     connection.executescript(_SCHEMA_V2)
 
 
+#: Модуль многопозиционных сертификатов (версия 3). Один PDF органа по
+#: сертификации на практике удостоверяет не один товар, а таблицу из
+#: десятков позиций («ПРИЛОЖЕНИЕ К СЕРТИФИКАТУ»), каждая — со своим
+#: наименованием и сроком годности. Прежняя схема допускала только одну
+#: запись на файл (``pdf_path`` был уникален сам по себе); теперь уникальна
+#: пара «файл + порядковый номер позиции в приложении». SQLite не умеет
+#: менять ограничение UNIQUE через ALTER TABLE, поэтому таблица
+#: пересоздаётся с переносом данных (существующие записи получают
+#: ``row_index = 0`` — они и были единственной позицией на файл).
+_SCHEMA_V3: Final[str] = """
+CREATE TABLE certificates_v3 (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_name           TEXT    NOT NULL,
+    normalized_name        TEXT    NOT NULL DEFAULT '',
+    translit_name          TEXT    NOT NULL DEFAULT '',
+    name_signature         TEXT    NOT NULL DEFAULT '',
+    token_signature        TEXT    NOT NULL DEFAULT '',
+    brand                  TEXT    NOT NULL DEFAULT '',
+    manufacturer           TEXT    NOT NULL DEFAULT '',
+    applicant              TEXT    NOT NULL DEFAULT '',
+    country                TEXT    NOT NULL DEFAULT '',
+    certificate_number     TEXT    NOT NULL DEFAULT '',
+    certificate_date       TEXT,
+    valid_from             TEXT,
+    expiry_date            TEXT,
+    issued_by              TEXT    NOT NULL DEFAULT '',
+    volume_value           REAL,
+    volume_unit            TEXT    NOT NULL DEFAULT '',
+    volume_raw             TEXT    NOT NULL DEFAULT '',
+    pack_count             INTEGER NOT NULL DEFAULT 1,
+    row_index              INTEGER NOT NULL DEFAULT 0,
+    pdf_name               TEXT    NOT NULL DEFAULT '',
+    pdf_path               TEXT    NOT NULL,
+    page_count             INTEGER NOT NULL DEFAULT 0,
+    file_hash              TEXT    NOT NULL DEFAULT '',
+    file_size              INTEGER NOT NULL DEFAULT 0,
+    file_mtime             REAL    NOT NULL DEFAULT 0,
+    indexed_at             TEXT    NOT NULL,
+    updated_at             TEXT    NOT NULL,
+    raw_text               TEXT    NOT NULL DEFAULT '',
+    extraction_confidence  REAL    NOT NULL DEFAULT 0,
+    is_active              INTEGER NOT NULL DEFAULT 1,
+    UNIQUE (pdf_path, row_index)
+);
+
+INSERT INTO certificates_v3 (
+    id, product_name, normalized_name, translit_name, name_signature, token_signature,
+    brand, manufacturer, applicant, country, certificate_number, certificate_date,
+    valid_from, expiry_date, issued_by, volume_value, volume_unit, volume_raw, pack_count,
+    row_index, pdf_name, pdf_path, page_count, file_hash, file_size, file_mtime,
+    indexed_at, updated_at, raw_text, extraction_confidence, is_active
+)
+SELECT
+    id, product_name, normalized_name, translit_name, name_signature, token_signature,
+    brand, manufacturer, applicant, country, certificate_number, certificate_date,
+    valid_from, expiry_date, issued_by, volume_value, volume_unit, volume_raw, pack_count,
+    0, pdf_name, pdf_path, page_count, file_hash, file_size, file_mtime,
+    indexed_at, updated_at, raw_text, extraction_confidence, is_active
+FROM certificates;
+
+DROP TABLE certificates;
+ALTER TABLE certificates_v3 RENAME TO certificates;
+
+CREATE INDEX IF NOT EXISTS idx_certificates_normalized ON certificates (normalized_name);
+CREATE INDEX IF NOT EXISTS idx_certificates_signature  ON certificates (name_signature);
+CREATE INDEX IF NOT EXISTS idx_certificates_hash       ON certificates (file_hash);
+CREATE INDEX IF NOT EXISTS idx_certificates_expiry     ON certificates (expiry_date);
+CREATE INDEX IF NOT EXISTS idx_certificates_active     ON certificates (is_active);
+CREATE INDEX IF NOT EXISTS idx_certificates_number     ON certificates (certificate_number);
+CREATE INDEX IF NOT EXISTS idx_certificates_path       ON certificates (pdf_path);
+"""
+
+
+def _migration_003_multi_row_certificates(connection: sqlite3.Connection) -> None:
+    """Пересоздаёт таблицу сертификатов с поддержкой нескольких позиций на файл.
+
+    Триггеры полнотекстового индекса привязаны к таблице ``certificates`` и
+    уничтожаются вместе с ней при ``DROP TABLE`` — их нужно создать заново,
+    а сам индекс перестроить, чтобы он не расходился со старыми ``rowid``.
+
+    Args:
+        connection: Открытое соединение SQLite.
+    """
+    connection.executescript(_SCHEMA_V3)
+    _try_create_fts(connection)
+    rebuild_fts(connection)
+
+
 def _try_create_fts(connection: sqlite3.Connection) -> None:
     """Создаёт полнотекстовый индекс, если сборка SQLite поддерживает FTS5.
 
@@ -302,6 +390,7 @@ def _try_create_fts(connection: sqlite3.Connection) -> None:
 MIGRATIONS: Final[dict[int, Callable[[sqlite3.Connection], None]]] = {
     1: _migration_001_initial,
     2: _migration_002_alias_manager,
+    3: _migration_003_multi_row_certificates,
 }
 
 #: Целевая версия схемы.

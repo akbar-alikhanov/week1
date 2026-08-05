@@ -16,9 +16,9 @@ from typing import Any
 
 from app.core.constants import PDF_MAX_PAGES_TO_PARSE, RAW_TEXT_EXCERPT_LIMIT
 from app.core.exceptions import PdfParsingError
-from app.core.units import extract_primary_volume
+from app.core.units import Volume, extract_primary_volume
 from app.models.certificate import Certificate
-from app.parsers.field_extractors import ExtractedFields, extract_all
+from app.parsers.field_extractors import ExtractedFields, extract_all, extract_appendix_rows
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -160,58 +160,114 @@ class PdfParser:
         """
         return extract_all(text, filename=path.name)
 
-    def parse(self, path: Path) -> Certificate:
-        """Полностью разбирает PDF-файл в объект сертификата.
+    def parse(self, path: Path) -> list[Certificate]:
+        """Полностью разбирает PDF-файл в один или несколько объектов сертификата.
+
+        Орган по сертификации на практике удостоверяет одним файлом не один
+        товар, а таблицу из десятков позиций («ПРИЛОЖЕНИЕ К СЕРТИФИКАТУ»),
+        каждая — со своим наименованием и сроком годности; такой файл даёт
+        несколько :class:`Certificate` с общими для файла полями (изготовитель,
+        заявитель, номер) и собственными наименованием/сроком годности у каждой
+        позиции. Если таблица приложения не найдена (старый формат — один
+        товар на файл), используется прежнее посистемное извлечение.
+
+        Номер сертификата берётся из имени файла, а не из текста: на практике
+        оно совпадает с номером и не подвержено разночтениям распознавания
+        текста внутри PDF.
 
         Args:
             path: Путь к PDF-файлу.
 
         Returns:
-            Готовый к сохранению :class:`Certificate`.
+            Список готовых к сохранению :class:`Certificate` (минимум один).
 
         Raises:
             PdfParsingError: Если файл не удалось прочитать.
         """
         info = self.read_document(path)
         fields = self.extract_fields(path, info.text)
+        certificate_number = path.stem
+
+        now = datetime.now()
+        common: dict[str, Any] = {
+            "pdf_path": str(path),
+            "pdf_name": path.name,
+            "brand": fields.brand,
+            "manufacturer": fields.manufacturer,
+            "applicant": fields.applicant,
+            "country": fields.country,
+            "certificate_number": certificate_number,
+            "certificate_date": fields.certificate_date,
+            "valid_from": fields.valid_from,
+            "issued_by": fields.issued_by,
+            "page_count": info.page_count,
+            "file_hash": info.file_hash,
+            "file_size": info.file_size,
+            "file_mtime": info.file_mtime,
+            "indexed_at": now,
+            "updated_at": now,
+            "raw_text": info.text[:RAW_TEXT_EXCERPT_LIMIT],
+            "is_active": True,
+        }
+
+        appendix_rows = extract_appendix_rows(info.text)
+        if appendix_rows:
+            # Наименование и срок годности всегда найдены (иначе позиция не
+            # попадает в appendix_rows) — недостаёт только даты выдачи.
+            achieved = 4 + (1 if certificate_number else 0) + (1 if fields.certificate_date else 0)
+            confidence = round(achieved / 6.0, 3)
+            return [
+                Certificate(
+                    product_name=row.product_name,
+                    row_index=row.row_index,
+                    expiry_date=row.expiry_date,
+                    extraction_confidence=confidence,
+                    **self._volume_fields(row.product_name),
+                    **common,
+                )
+                for row in appendix_rows
+            ]
 
         volume = extract_primary_volume(fields.product_name)
         if volume is None:
             # Объём может быть указан отдельной строкой в теле документа.
             volume = extract_primary_volume(info.text[:1200])
 
-        now = datetime.now()
         certificate = Certificate(
             product_name=fields.product_name or path.stem,
-            pdf_path=str(path),
-            pdf_name=path.name,
-            brand=fields.brand,
-            manufacturer=fields.manufacturer,
-            applicant=fields.applicant,
-            country=fields.country,
-            certificate_number=fields.certificate_number,
-            certificate_date=fields.certificate_date,
-            valid_from=fields.valid_from,
+            row_index=0,
             expiry_date=fields.expiry_date,
-            issued_by=fields.issued_by,
+            extraction_confidence=fields.confidence,
             volume_value=volume.base_value if volume else None,
             volume_unit=volume.base_unit if volume else "",
             volume_raw=volume.raw if volume else "",
             pack_count=volume.pack_count if volume else 1,
-            page_count=info.page_count,
-            file_hash=info.file_hash,
-            file_size=info.file_size,
-            file_mtime=info.file_mtime,
-            indexed_at=now,
-            updated_at=now,
-            raw_text=info.text[:RAW_TEXT_EXCERPT_LIMIT],
-            extraction_confidence=fields.confidence,
-            is_active=True,
+            **common,
         )
 
         if fields.warnings:
             _LOGGER.debug("%s: %s", path.name, "; ".join(fields.warnings))
-        return certificate
+        return [certificate]
+
+    @staticmethod
+    def _volume_fields(text: str) -> dict[str, Any]:
+        """Извлекает объём/фасовку из текста и приводит их к полям модели.
+
+        Args:
+            text: Наименование позиции, из которого нужно достать объём.
+
+        Returns:
+            Словарь с ключами ``volume_value``, ``volume_unit``, ``volume_raw``
+            и ``pack_count``, готовый для распаковки в конструктор
+            :class:`Certificate`.
+        """
+        volume: Volume | None = extract_primary_volume(text)
+        return {
+            "volume_value": volume.base_value if volume else None,
+            "volume_unit": volume.base_unit if volume else "",
+            "volume_raw": volume.raw if volume else "",
+            "pack_count": volume.pack_count if volume else 1,
+        }
 
     # -------------------------------------------------------------- рендеринг
     def render_page(

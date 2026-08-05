@@ -57,7 +57,11 @@ class MatchingSettings:
             конкретную фасовку, поэтому «похожий объём» недопустим.
         min_name_score: Минимальная оценка совпадения наименования, ниже
             которой кандидат отбраковывается независимо от объёма и срока.
-        expiry_tolerance_days: Допустимое расхождение сроков в днях.
+        expiry_tolerance_days: Ширина окна допуска по сроку годности в днях
+            (в каждую сторону от требуемой даты). За пределами окна оценка не
+            обнуляется, а продолжает плавно снижаться — благодаря этому, даже
+            если ни один сертификат не попал в окно, подбор всё равно
+            предложит ближайший по сроку вариант вместо отказа.
         require_valid_expiry: Исключать ли сертификаты с истёкшим сроком.
         missing_volume_score: Нейтральная оценка при отсутствии объёма.
         missing_expiry_score: Нейтральная оценка при отсутствии срока.
@@ -82,7 +86,7 @@ class MatchingSettings:
     volume_tolerance_ratio: float = 0.02
     strict_volume_match: bool = True
     min_name_score: float = 0.55
-    expiry_tolerance_days: int = 180
+    expiry_tolerance_days: int = 45
     require_valid_expiry: bool = True
     missing_volume_score: float = 0.55
     missing_expiry_score: float = 0.60
@@ -138,7 +142,11 @@ class IndexingSettings:
         rescan_on_start: Проверять ли изменения при запуске приложения.
         recursive: Обходить ли вложенные папки.
         reindex_on_hash_change: Переиндексировать файл при изменении хэша.
-        max_pages: Сколько страниц PDF анализировать.
+        max_pages: Сколько страниц PDF анализировать. Титульный лист занимает
+            страницу-две, но таблица товарных позиций («ПРИЛОЖЕНИЕ К
+            СЕРТИФИКАТУ») может растянуться на десятки страниц — предел
+            защищает только от аномально больших файлов, не от обычных
+            приложений.
         watch_debounce_seconds: Пауза перед обработкой изменений в папке.
     """
 
@@ -148,13 +156,13 @@ class IndexingSettings:
     rescan_on_start: bool = True
     recursive: bool = True
     reindex_on_hash_change: bool = True
-    max_pages: int = 4
+    max_pages: int = 200
     watch_debounce_seconds: float = 2.0
 
     def validate(self) -> None:
         """Приводит значения к допустимым диапазонам."""
         self.max_workers = int(_clamp(self.max_workers, 0, 64))
-        self.max_pages = int(_clamp(self.max_pages, 1, 30))
+        self.max_pages = int(_clamp(self.max_pages, 1, 500))
         self.watch_debounce_seconds = _clamp(self.watch_debounce_seconds, 0.2, 60.0)
 
 
