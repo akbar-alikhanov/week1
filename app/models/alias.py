@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, Final
 
 from app.core.text import normalize, token_key
-from app.core.units import UNIT_LABELS
+from app.core.units import UNIT_LABELS, Volume
 
 #: Сколько раз псевдоним, созданный не пользователем, должен быть применён,
 #: прежде чем его уровень доверия поднимется с 80 % до 95 % («подтверждено
@@ -116,6 +116,24 @@ class Alias:
         if self.hit_count >= CONFIRM_HIT_THRESHOLD:
             return "ИИ (подтверждено)"
         return "ИИ"
+
+    @property
+    def volume(self) -> Volume | None:
+        """Объём, зафиксированный в словаре, в виде доменного объекта.
+
+        Returns:
+            :class:`~app.core.units.Volume` либо ``None``, если объём не указан.
+        """
+        if self.volume_value is None or not self.volume_unit:
+            return None
+        dimension = {"ml": "volume", "g": "mass", "pcs": "count"}.get(self.volume_unit, "volume")
+        return Volume(
+            value=self.volume_value,
+            unit=self.volume_unit,
+            base_value=self.volume_value,
+            base_unit=self.volume_unit,
+            dimension=dimension,
+        )
 
     @property
     def volume_label(self) -> str:

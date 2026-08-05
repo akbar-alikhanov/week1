@@ -29,9 +29,16 @@ from app.ai.vector_index import VectorIndex
 from app.config.settings import SettingsService
 from app.core.events import ProgressReporter
 from app.core.text import normalize
+from app.core.units import volume_similarity
 from app.models.alias import Alias
 from app.models.certificate import Certificate
-from app.models.matching import MatchCandidate, MatchResult, MatchSource, MatchStatus
+from app.models.matching import (
+    MatchCandidate,
+    MatchResult,
+    MatchSource,
+    MatchStatus,
+    ScoreBreakdown,
+)
 from app.models.order import OrderRow
 from app.repositories.alias_repository import AliasRepository
 from app.repositories.certificate_repository import CertificateRepository
@@ -254,27 +261,37 @@ class MatchingService:
     def _match_by_alias(self, row: OrderRow, context: ScoringContext) -> MatchResult | None:
         """Этап 1: поиск в таблице псевдонимов.
 
-        Псевдоним фиксирует наименование/бренд/объём товара, а не одну
+        Псевдоним фиксирует наименование и объём товара, а не одну
         конкретную позицию сертификата: у одного товара может быть несколько
         подходящих сертификатов (переизданный сертификат с другим сроком
-        действия, разные партии), и жёсткая привязка к позиции, выбранной в
-        момент создания псевдонима, игнорировала бы более подходящий по
-        сроку вариант. Поэтому по данным псевдонима собираются все
-        действующие сертификаты этого товара, а выбор между ними идёт по
-        тем же правилам, что и для обычных кандидатов (:meth:`_decide`) —
-        в первую очередь по близости к требуемому сроку.
+        действия, разные партии). Поэтому по данным псевдонима строго (без
+        нечёткого допуска) собираются все действующие сертификаты этого
+        товара, а выбор между ними идёт по тем же правилам, что и для
+        обычных кандидатов (:meth:`_decide`) — в первую очередь по близости
+        к требуемому сроку.
+
+        Если товар в заказе распознан по словарю, но ни один действующий
+        сертификат строго не соответствует зафиксированным в нём
+        наименованию и объёму, строка считается ненайденной — подбор не
+        откатывается к нечёткому/семантическому поиску по всему справочнику
+        (это могло бы подставить другой объём или похожий, но не тот товар,
+        который человек явно закрепил за этим текстом заказа).
 
         Args:
             row: Строка заказа.
             context: Общий контекст оценки.
 
         Returns:
-            Результат подбора либо ``None``, если подходящего псевдонима нет.
+            Результат подбора либо ``None``, если для строки нет псевдонима.
         """
         if not context.settings.prefer_alias:
             return None
 
-        for alias in self._aliases.find_for_text(row.search_text):
+        aliases = self._aliases.find_for_text(row.search_text)
+        if not aliases:
+            return None
+
+        for alias in aliases:
             candidates = self._alias_candidates(alias, row, context)
             if not candidates:
                 continue
@@ -287,18 +304,31 @@ class MatchingService:
             prefix = f"Применён псевдоним «{alias.source_text}»"
             result.note = f"{prefix} — {result.note}" if result.note else prefix
             return result
-        return None
+
+        primary = aliases[0]
+        detail = primary.target_name or primary.source_text
+        if primary.volume_label:
+            detail += f", {primary.volume_label}"
+        return MatchResult(
+            row=row,
+            status=MatchStatus.NOT_FOUND,
+            alias_applied=True,
+            note=f"В словаре для этого товара указано «{detail}» — подходящего сертификата нет",
+        )
 
     def _alias_candidates(
         self, alias: Alias, row: OrderRow, context: ScoringContext
     ) -> list[MatchCandidate]:
-        """Находит и оценивает сертификаты, соответствующие данным псевдонима.
+        """Находит сертификаты, строго соответствующие данным псевдонима.
 
-        Наименование считается подтверждённым пользователем (оценка
-        наименования фиксируется в 1.0), а объём и срок оцениваются по
-        факту — чтобы среди нескольких сертификатов одного товара подбор
-        честно выбирал наиболее подходящий по сроку, а не всегда возвращал
-        тот, что был выбран при создании псевдонима.
+        И наименование, и объём берутся из словаря, а не из строки заказа:
+        псевдоним — подтверждённое человеком решение о том, что представляет
+        собой товар, и заказ может называть/оформлять объём иначе (опечатка,
+        сокращение). Сертификат либо совпадает с обоими критериями строго
+        (наименование — точно по нормализованной форме, объём — в пределах
+        обычного допуска на округление), либо не рассматривается вовсе.
+        Единственное, что оценивается по факту, — срок годности: он и решает,
+        какой из нескольких подходящих сертификатов выбрать.
 
         Args:
             alias: Найденный псевдоним.
@@ -308,6 +338,7 @@ class MatchingService:
         Returns:
             Кандидаты, отсортированные по убыванию итоговой оценки.
         """
+        settings = context.settings
         key = normalize(alias.target_name) if alias.target_name else ""
         certificates = list(self._by_normalized.get(key, ())) if key else []
 
@@ -322,15 +353,59 @@ class MatchingService:
             if certificate is not None and certificate.is_active:
                 certificates = [certificate]
 
+        alias_volume = alias.volume
         candidates: list[MatchCandidate] = []
         for certificate in certificates:
-            if is_hard_mismatch(row, certificate, context):
+            if (
+                settings.require_valid_expiry
+                and certificate.expiry_date is not None
+                and certificate.expiry_date < context.reference_date
+            ):
                 continue
+
+            if alias_volume is not None:
+                # Объём зафиксирован в словаре — сравнение строгое (в
+                # пределах обычного допуска на округление), и сертификаты
+                # вне него не рассматриваются вовсе.
+                similarity = volume_similarity(
+                    alias_volume,
+                    certificate.volume,
+                    tolerance_ratio=settings.volume_tolerance_ratio,
+                )
+                if similarity < 1.0:
+                    continue
+                volume_score = 1.0
+            else:
+                # Словарь объём не фиксирует (редкий случай — старая запись
+                # или товар без объёма) — сравниваем как обычно, по объёму
+                # из строки заказа.
+                volume_score = volume_similarity(
+                    row.volume,
+                    certificate.volume,
+                    tolerance_ratio=settings.volume_tolerance_ratio,
+                    missing_score=settings.missing_volume_score,
+                )
+
             breakdown = score_candidate(
                 row, certificate, lexical=1.0, semantic=None, context=context
             )
+            name_weight, volume_weight, expiry_weight = breakdown.weights
+            # Наименование подтверждено псевдонимом, объём — либо строгим
+            # фильтром выше, либо оценкой по объёму заказа; честной остаётся
+            # только составляющая срока.
+            confirmed = ScoreBreakdown(
+                name=1.0,
+                volume=volume_score,
+                expiry=breakdown.expiry,
+                total=(
+                    name_weight + volume_score * volume_weight + breakdown.expiry * expiry_weight
+                ),
+                lexical=1.0,
+                semantic=None,
+                weights=breakdown.weights,
+            )
             candidates.append(
-                MatchCandidate(certificate=certificate, score=breakdown, source=MatchSource.ALIAS)
+                MatchCandidate(certificate=certificate, score=confirmed, source=MatchSource.ALIAS)
             )
 
         candidates.sort(key=_candidate_sort_key, reverse=True)

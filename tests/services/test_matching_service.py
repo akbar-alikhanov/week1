@@ -255,9 +255,10 @@ class TestAliasStage:
     ) -> None:
         """Среди сертификатов с одинаковым наименованием отбраковывается несовпадающая фасовка.
 
-        В строгом режиме (по умолчанию) сертификат на 200 мл не подтверждает
-        заказанные 100 мл, даже если оба сертификата найдены по одному и тому
-        же псевдониму — как и для обычных кандидатов.
+        Псевдоним здесь не фиксирует объём явно (только наименование) — в
+        этом случае подбор возвращается к объёму из строки заказа, как и для
+        обычных кандидатов. Строгое сравнение с объёмом, зафиксированным в
+        самом псевдониме, проверяется отдельными тестами ниже.
         """
         wrong_volume = make_certificate(
             "Товар Х", "/c/200ml.pdf", volume_value=200.0, volume_unit="ml", expiry_date=_FUTURE
@@ -279,6 +280,102 @@ class TestAliasStage:
         assert result.alias_applied
         assert result.certificate is not None
         assert result.certificate.pdf_path == "/c/100ml.pdf"
+
+    def test_alias_matches_by_dictionary_volume_even_when_order_text_implies_other_volume(
+        self,
+        matching_service: MatchingService,
+        certificate_repository: CertificateRepository,
+        alias_repository: AliasRepository,
+    ) -> None:
+        """Подбор идёт по объёму, зафиксированному в словаре, а не по тексту заказа.
+
+        В строке заказа явно написано «150ml», но псевдоним закрепляет за
+        этим текстом товар объёмом 100 мл — должен найтись именно
+        100-миллилитровый сертификат, объём из текста заказа не участвует.
+        """
+        wrong_volume = make_certificate(
+            "Товар Х", "/c/150ml.pdf", volume_value=150.0, volume_unit="ml", expiry_date=_FUTURE
+        )
+        right_volume = make_certificate(
+            "Товар Х", "/c/100ml.pdf", volume_value=100.0, volume_unit="ml", expiry_date=_FUTURE
+        )
+        certificate_repository.upsert_many([wrong_volume, right_volume])
+        alias_repository.save(
+            Alias(
+                source_text="TP Kh 150ml",
+                certificate_id=right_volume.id,
+                target_name="Товар Х",
+                volume_value=100.0,
+                volume_unit="ml",
+            )
+        )
+
+        result = matching_service.match_row(OrderRow(row_number=1, product_name="TP Kh 150ml"))
+
+        assert result.alias_applied
+        assert result.certificate is not None
+        assert result.certificate.pdf_path == "/c/100ml.pdf"
+
+    def test_alias_with_dictionary_volume_and_no_matching_certificate_is_not_found(
+        self,
+        matching_service: MatchingService,
+        certificate_repository: CertificateRepository,
+        alias_repository: AliasRepository,
+    ) -> None:
+        """Если сертификата на объём, зафиксированный в словаре, нет — статус «не найден»."""
+        certificate_repository.add(
+            make_certificate(
+                "Товар Х", "/c/150ml.pdf", volume_value=150.0, volume_unit="ml", expiry_date=_FUTURE
+            )
+        )
+        alias_repository.save(
+            Alias(
+                source_text="TP Kh 100ml",
+                target_name="Товар Х",
+                volume_value=100.0,
+                volume_unit="ml",
+            )
+        )
+
+        result = matching_service.match_row(OrderRow(row_number=1, product_name="TP Kh 100ml"))
+
+        assert result.alias_applied
+        assert result.status is MatchStatus.NOT_FOUND
+        assert result.certificate is None
+
+    def test_alias_strict_miss_does_not_fall_back_to_fuzzy_search(
+        self,
+        matching_service: MatchingService,
+        certificate_repository: CertificateRepository,
+        alias_repository: AliasRepository,
+    ) -> None:
+        """Провал строгого подбора по словарю не подменяется похожим товаром.
+
+        Есть лексически похожий сертификат другого объёма, который обычный
+        нечёткий поиск нашёл бы — но раз товар распознан по словарю, подбор
+        должен остановиться на «не найдено», а не тихо подставить его.
+        """
+        lookalike = make_certificate(
+            "Товар Х",
+            "/c/lookalike.pdf",
+            volume_value=250.0,
+            volume_unit="ml",
+            expiry_date=_FUTURE,
+        )
+        certificate_repository.add(lookalike)
+        alias_repository.save(
+            Alias(
+                source_text="TP Kh 100ml",
+                target_name="Товар Х",
+                volume_value=100.0,
+                volume_unit="ml",
+            )
+        )
+
+        result = matching_service.match_row(OrderRow(row_number=1, product_name="TP Kh 100ml"))
+
+        assert result.status is MatchStatus.NOT_FOUND
+        assert result.certificate is None
 
 
 class TestLexicalStage:
