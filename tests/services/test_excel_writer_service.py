@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -20,7 +21,13 @@ from app.models.matching import (  # noqa: E402
     ScoreBreakdown,
 )
 from app.models.order import OrderDocument, OrderRow  # noqa: E402
-from app.parsers.column_mapper import ROLE_PRODUCT  # noqa: E402
+from app.parsers.column_mapper import (  # noqa: E402
+    ROLE_CERTIFICATE,
+    ROLE_CERTIFICATE_EXPIRY,
+    ROLE_EXPIRY,
+    ROLE_PRODUCT,
+    ROLE_QUANTITY,
+)
 from app.services.excel_writer_service import ExcelWriterService  # noqa: E402
 
 
@@ -45,6 +52,57 @@ def _document(path: Path) -> OrderDocument:
         OrderRow(row_number=3, product_name="Товар без сертификата"),
     ]
     return document
+
+
+def _build_order_file_with_requested_expiry(path: Path) -> None:
+    """Создаёт файл заказа с колонкой требуемого срока годности (роль ROLE_EXPIRY).
+
+    Именно такой файл воспроизводит критическую ошибку из отчёта: колонка D
+    «Требуемый срок годности» уже заполнена значениями из заказа и не должна
+    измениться после записи результата подбора.
+    """
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Заказ"
+    sheet.append(["№", "Наименование товара", "Кол-во", "Требуемый срок годности"])
+    sheet.append([1, "Лечебные травы 100 мл", 10, dt.date(2029, 4, 1)])
+    sheet.append([2, "Товар без сертификата", 5, dt.date(2028, 1, 15)])
+    workbook.save(path)
+
+
+def _document_with_requested_expiry(path: Path) -> OrderDocument:
+    """Строит объект заказа, соответствующий _build_order_file_with_requested_expiry."""
+    document = OrderDocument(
+        path=path,
+        sheet_name="Заказ",
+        header_row=1,
+        column_map={ROLE_PRODUCT: 1, ROLE_QUANTITY: 2, ROLE_EXPIRY: 3},
+    )
+    document.rows = [
+        OrderRow(
+            row_number=2,
+            product_name="Лечебные травы 100 мл",
+            quantity=10,
+            requested_expiry=dt.date(2029, 4, 1),
+        ),
+        OrderRow(
+            row_number=3,
+            product_name="Товар без сертификата",
+            quantity=5,
+            requested_expiry=dt.date(2028, 1, 15),
+        ),
+    ]
+    return document
+
+
+def _cell_date(sheet: Any, row: int, column: int) -> dt.date | None:
+    """Приводит значение ячейки к ``date`` (openpyxl округляет date до datetime)."""
+    value = sheet.cell(row=row, column=column).value
+    if isinstance(value, dt.datetime):
+        return value.date()
+    if isinstance(value, dt.date):
+        return value
+    return None
 
 
 def _matched_result(row: OrderRow) -> MatchResult:
@@ -167,3 +225,127 @@ class TestWrite:
         fill_type = sheet.cell(row=2, column=2).fill.fill_type
         assert fill_type is None
         workbook.close()
+
+
+class TestRequestedExpiryNeverOverwritten:
+    """Регрессия критической ошибки: требуемый срок годности заказа (роль
+    ``ROLE_EXPIRY``) раньше затирался сроком годности НАЙДЕННОГО сертификата,
+    потому что обе даты писались в одну и ту же колонку. Теперь у срока
+    найденного сертификата отдельная роль (``ROLE_CERTIFICATE_EXPIRY``), и
+    колонка с требуемым сроком заказа никогда не участвует в записи.
+    """
+
+    def test_requested_expiry_column_untouched_after_write(self, tmp_path: Path) -> None:
+        """Значения в колонке требуемого срока годности не меняются после write()."""
+        order_path = tmp_path / "order.xlsx"
+        _build_order_file_with_requested_expiry(order_path)
+        document = _document_with_requested_expiry(order_path)
+        results = [_matched_result(document.rows[0]), _not_found_result(document.rows[1])]
+
+        writer = ExcelWriterService(ExportSettings())
+        destination = writer.build_output_path(order_path)
+        writer.write(document, results, destination)
+
+        workbook = openpyxl.load_workbook(destination)
+        sheet = workbook["Заказ"]
+        assert _cell_date(sheet, 2, 4) == dt.date(2029, 4, 1)
+        assert _cell_date(sheet, 3, 4) == dt.date(2028, 1, 15)
+        workbook.close()
+
+    def test_certificate_number_and_expiry_written_to_new_columns(self, tmp_path: Path) -> None:
+        """Найденный сертификат и его срок пишутся в новые колонки E/F с нужными заголовками."""
+        order_path = tmp_path / "order.xlsx"
+        _build_order_file_with_requested_expiry(order_path)
+        document = _document_with_requested_expiry(order_path)
+        results = [_matched_result(document.rows[0]), _not_found_result(document.rows[1])]
+
+        writer = ExcelWriterService(ExportSettings())
+        destination = writer.build_output_path(order_path)
+        writer.write(document, results, destination)
+
+        workbook = openpyxl.load_workbook(destination)
+        sheet = workbook["Заказ"]
+        assert sheet.cell(row=1, column=5).value == "Сертификат"
+        assert sheet.cell(row=2, column=5).value == "UZ.183255"
+        assert sheet.cell(row=1, column=6).value == "С.Г. сертификата"
+        assert sheet.cell(row=2, column=6).value == "22.03.2029"
+        workbook.close()
+
+    def test_order_number_name_and_quantity_untouched(self, tmp_path: Path) -> None:
+        """Колонки A/B/C (номер, наименование, количество) не изменяются."""
+        order_path = tmp_path / "order.xlsx"
+        _build_order_file_with_requested_expiry(order_path)
+        document = _document_with_requested_expiry(order_path)
+        results = [_matched_result(document.rows[0]), _not_found_result(document.rows[1])]
+
+        writer = ExcelWriterService(ExportSettings())
+        destination = writer.build_output_path(order_path)
+        writer.write(document, results, destination)
+
+        workbook = openpyxl.load_workbook(destination)
+        sheet = workbook["Заказ"]
+        assert sheet.cell(row=2, column=1).value == 1
+        assert sheet.cell(row=2, column=2).value == "Лечебные травы 100 мл"
+        assert sheet.cell(row=2, column=3).value == 10
+        assert sheet.cell(row=3, column=1).value == 2
+        assert sheet.cell(row=3, column=2).value == "Товар без сертификата"
+        assert sheet.cell(row=3, column=3).value == 5
+        workbook.close()
+
+    def test_existing_certificate_expiry_column_is_reused_not_duplicated(
+        self, tmp_path: Path
+    ) -> None:
+        """Повторная обработка уже обработанного файла не плодит дублирующих колонок.
+
+        Файл уже содержит колонки «Сертификат» и «С.Г. сертификата» (как
+        будто это результат прошлой обработки) — writer обязан их
+        переиспользовать, а не сдвигать/дублировать существующие колонки.
+        """
+        order_path = tmp_path / "order.xlsx"
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        sheet.title = "Заказ"
+        sheet.append(
+            [
+                "№",
+                "Наименование товара",
+                "Кол-во",
+                "Требуемый срок годности",
+                "Сертификат",
+                "С.Г. сертификата",
+            ]
+        )
+        sheet.append([1, "Лечебные травы 100 мл", 10, dt.date(2029, 4, 1), None, None])
+        workbook.save(order_path)
+
+        document = OrderDocument(
+            path=order_path,
+            sheet_name="Заказ",
+            header_row=1,
+            column_map={
+                ROLE_PRODUCT: 1,
+                ROLE_QUANTITY: 2,
+                ROLE_EXPIRY: 3,
+                ROLE_CERTIFICATE: 4,
+                ROLE_CERTIFICATE_EXPIRY: 5,
+            },
+        )
+        row = OrderRow(
+            row_number=2,
+            product_name="Лечебные травы 100 мл",
+            quantity=10,
+            requested_expiry=dt.date(2029, 4, 1),
+        )
+        document.rows = [row]
+
+        writer = ExcelWriterService(ExportSettings())
+        destination = writer.build_output_path(order_path)
+        writer.write(document, [_matched_result(row)], destination)
+
+        result_workbook = openpyxl.load_workbook(destination)
+        result_sheet = result_workbook["Заказ"]
+        assert result_sheet.max_column == 6
+        assert _cell_date(result_sheet, 2, 4) == dt.date(2029, 4, 1)
+        assert result_sheet.cell(row=2, column=5).value == "UZ.183255"
+        assert result_sheet.cell(row=2, column=6).value == "22.03.2029"
+        result_workbook.close()

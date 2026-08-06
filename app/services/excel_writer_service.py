@@ -2,11 +2,24 @@
 
 Исходный файл заказа никогда не изменяется — создаётся копия. Это требование
 не только удобства, но и учётной дисциплины: оригинал документа поставщика
-должен оставаться неприкосновенным.
+должен оставаться неприкосновенным. Это касается не только самого файла
+(копия вместо правки на месте), но и КОЛОНОК внутри копии: программа только
+ДОБАВЛЯЕТ результат подбора в две свои колонки (номер найденного сертификата
+и его срок годности), не трогая ни одну из колонок исходного заказа —
+порядковый номер, наименование, количество и, что особенно важно, требуемый
+срок годности заказа (:attr:`~app.models.order.OrderRow.requested_expiry`,
+роль :data:`~app.parsers.column_mapper.ROLE_EXPIRY`). Раньше срок найденного
+сертификата ошибочно писался в ту же колонку, что и требуемый срок заказа —
+это стирало исходные данные и было критической ошибкой; теперь у срока
+найденного сертификата отдельная роль
+(:data:`~app.parsers.column_mapper.ROLE_CERTIFICATE_EXPIRY`), которая не
+пересекается с ролью требуемого срока ни по смыслу, ни по ключевым словам
+заголовка.
 
 Копия делается средствами openpyxl с сохранением форматирования, формул,
 объединённых ячеек и ширины колонок: пользователь получает свой привычный
-документ, в котором просто заполнены две колонки.
+документ, в котором просто добавлены (или обновлены, если уже существуют)
+две колонки — «Сертификат» и «С.Г. сертификата».
 """
 
 from __future__ import annotations
@@ -21,13 +34,21 @@ from app.core.constants import STATUS_AMBIGUOUS, STATUS_MATCHED, STATUS_NOT_FOUN
 from app.core.exceptions import ExportError
 from app.models.matching import MatchResult, MatchStatus
 from app.models.order import OrderDocument
-from app.parsers.column_mapper import ROLE_CERTIFICATE, ROLE_EXPIRY
+from app.parsers.column_mapper import ROLE_CERTIFICATE, ROLE_CERTIFICATE_EXPIRY
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class ExcelWriterService:
-    """Записывает результаты подбора в копию файла заказа."""
+    """Записывает результаты подбора в копию файла заказа.
+
+    Пишет ровно в две колонки — номер найденного сертификата и его срок
+    годности (роли :data:`~app.parsers.column_mapper.ROLE_CERTIFICATE` и
+    :data:`~app.parsers.column_mapper.ROLE_CERTIFICATE_EXPIRY`). Ни одна
+    другая колонка заказа, включая требуемый срок годности
+    (:data:`~app.parsers.column_mapper.ROLE_EXPIRY`), никогда не изменяется
+    и не создаётся этим сервисом — см. докстринг модуля.
+    """
 
     def __init__(self, settings: ExportSettings) -> None:
         """Создаёт сервис записи.
@@ -97,8 +118,12 @@ class ExcelWriterService:
             certificate_column = self._resolve_column(
                 sheet, document, ROLE_CERTIFICATE, self._settings.certificate_column_title
             )
+            # ВАЖНО: срок НАЙДЕННОГО сертификата пишется по роли
+            # ROLE_CERTIFICATE_EXPIRY, а не ROLE_EXPIRY — последняя относится
+            # к требуемому сроку годности заказа и никогда не должна
+            # затрагиваться записью результата (см. докстринг модуля).
             expiry_column = self._resolve_column(
-                sheet, document, ROLE_EXPIRY, self._settings.expiry_column_title
+                sheet, document, ROLE_CERTIFICATE_EXPIRY, self._settings.expiry_column_title
             )
             score_column = (
                 self._resolve_column(sheet, document, "score", "Совпадение, %")

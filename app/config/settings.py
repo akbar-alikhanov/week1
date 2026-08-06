@@ -173,8 +173,11 @@ class ExportSettings:
         report_format: Формат отчёта (``xlsx`` или ``csv``).
         open_output_after_run: Открывать ли папку результата по завершении.
         date_format: Формат вывода дат в Excel.
-        certificate_column_title: Заголовок колонки с номером сертификата.
-        expiry_column_title: Заголовок колонки со сроком действия.
+        certificate_column_title: Заголовок колонки с номером НАЙДЕННОГО
+            сертификата (создаётся программой; требуемый срок годности
+            заказа — отдельная, всегда нетронутая колонка исходного файла).
+        expiry_column_title: Заголовок колонки со сроком годности
+            НАЙДЕННОГО сертификата (создаётся программой).
         add_score_column: Добавлять ли служебную колонку с оценкой совпадения.
         filename_suffix: Суффикс имени итогового файла.
     """
@@ -191,7 +194,7 @@ class ExportSettings:
     open_output_after_run: bool = True
     date_format: str = "%d.%m.%Y"
     certificate_column_title: str = "Сертификат"
-    expiry_column_title: str = "Срок сертификата"
+    expiry_column_title: str = "С.Г. сертификата"
     add_score_column: bool = False
     filename_suffix: str = "_с_сертификатами"
 

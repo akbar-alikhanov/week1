@@ -360,13 +360,13 @@ class SettingsView(BaseView):
         )
         self._entry_row(
             card.content,
-            "Заголовок колонки сертификата",
+            "Заголовок колонки номера сертификата",
             export.certificate_column_title,
             lambda value: self._set("export", "certificate_column_title", value),
         )
         self._entry_row(
             card.content,
-            "Заголовок колонки срока",
+            "Заголовок колонки срока сертификата",
             export.expiry_column_title,
             lambda value: self._set("export", "expiry_column_title", value),
         )

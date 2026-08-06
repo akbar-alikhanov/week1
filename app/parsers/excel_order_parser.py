@@ -12,6 +12,7 @@ from app.models.order import OrderDocument, OrderRow
 from app.parsers.column_mapper import (
     ROLE_BRAND,
     ROLE_CERTIFICATE,
+    ROLE_CERTIFICATE_EXPIRY,
     ROLE_CODE,
     ROLE_EXPIRY,
     ROLE_PRICE,
@@ -259,7 +260,8 @@ def _describe_columns(column_map: dict[str, int]) -> str:
         ROLE_VOLUME: "объём",
         ROLE_BRAND: "бренд",
         ROLE_CERTIFICATE: "сертификат",
-        ROLE_EXPIRY: "срок",
+        ROLE_EXPIRY: "требуемый срок",
+        ROLE_CERTIFICATE_EXPIRY: "срок сертификата",
         ROLE_CODE: "код",
     }
     parts = [labels.get(role, role) for role in column_map if role in labels]
