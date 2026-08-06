@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+from app.ai.embeddings import EmbeddingBackend
+from app.ai.vector_index import VectorIndex
+from app.config.settings import SettingsService
 from app.core.events import EventBus
 from app.database.connection import Database
 from app.models.matching import (
@@ -17,14 +22,32 @@ from app.models.order import OrderRow
 from app.repositories.alias_repository import AliasRepository
 from app.repositories.certificate_product_repository import CertificateProductRepository
 from app.services.alias_service import AliasService
+from app.services.matching_service import MatchingService
 from tests.conftest import make_certificate
 
 
+def _make_matching_service(database: Database, tmp_path: Path) -> MatchingService:
+    """Собирает минимальный сервис подбора для внедрения в ``AliasService``."""
+    settings_service = SettingsService(tmp_path / "settings.json")
+    settings_service.load()
+    backend = EmbeddingBackend(enabled=False)
+    return MatchingService(
+        CertificateProductRepository(database),
+        AliasRepository(database),
+        settings_service,
+        backend,
+        VectorIndex(backend, None),
+    )
+
+
 @pytest.fixture
-def alias_service(database: Database) -> AliasService:
+def alias_service(database: Database, tmp_path: Path) -> AliasService:
     """Собранный сервис псевдонимов поверх временной базы данных."""
     return AliasService(
-        AliasRepository(database), CertificateProductRepository(database), EventBus()
+        AliasRepository(database),
+        CertificateProductRepository(database),
+        _make_matching_service(database, tmp_path),
+        EventBus(),
     )
 
 
@@ -41,14 +64,31 @@ class TestLearn:
         assert alias.target_name == certificate.product_name
         assert alias.volume_ml == certificate.volume_ml
 
-    def test_learn_publishes_event(self, database: Database) -> None:
+    def test_learn_stores_certificate_id_as_hint(
+        self,
+        alias_service: AliasService,
+        certificate_repository: CertificateProductRepository,
+    ) -> None:
+        """Обучение сохраняет id выбранной строки базы как необязательную подсказку."""
+        certificate_repository.replace_all([make_certificate("Лечебные травы 100 мл")])
+        certificate = certificate_repository.list_all()[0]
+        assert certificate.id is not None
+
+        alias = alias_service.learn("TP Herbal 100ml", certificate)
+
+        assert alias.certificate_product_id == certificate.id
+
+    def test_learn_publishes_event(self, database: Database, tmp_path: Path) -> None:
         """Создание псевдонима публикует доменное событие."""
         events = EventBus()
         received: list[object] = []
         events.subscribe("alias.created", lambda **kwargs: received.append(kwargs.get("alias")))
 
         service = AliasService(
-            AliasRepository(database), CertificateProductRepository(database), events
+            AliasRepository(database),
+            CertificateProductRepository(database),
+            _make_matching_service(database, tmp_path),
+            events,
         )
         certificate = make_certificate("Товар")
 
@@ -113,6 +153,17 @@ class TestDictionaryCrud:
         assert alias.is_manual is True
         assert alias.confidence == 100.0
         assert alias.brand == "Balton"
+
+    def test_add_stores_certificate_id_when_given(
+        self, alias_service: AliasService, certificate_repository: CertificateProductRepository
+    ) -> None:
+        """Ручное добавление сохраняет id выбранной строки базы, если он передан."""
+        certificate_repository.replace_all([make_certificate("Товар")])
+        certificate_id = certificate_repository.list_all()[0].id
+
+        alias = alias_service.add("Системное имя", "Товар", certificate_product_id=certificate_id)
+
+        assert alias.certificate_product_id == certificate_id
 
     def test_find_potential_duplicates_detects_close_variant(
         self, alias_service: AliasService
@@ -182,3 +233,65 @@ class TestFindRelatedCertificates:
         alias = alias_service.add("TP Herbal", "Товар, которого нет в базе")
 
         assert alias_service.find_related_certificates(alias) == []
+
+
+class TestSuggestCertificates:
+    """Проверки ИИ-предложений для карточки словаря (режим 1)."""
+
+    def test_suggests_matching_certificate(
+        self, alias_service: AliasService, certificate_repository: CertificateProductRepository
+    ) -> None:
+        """Похожий системному названию товар попадает в предложения."""
+        certificate_repository.replace_all(
+            [make_certificate("Лечебные травы, сироп 100 мл", volume_ml=100.0)]
+        )
+
+        suggestions = alias_service.suggest_certificates("TP Herbal syrup 100ml")
+
+        assert suggestions
+        assert suggestions[0].certificate.product_name == "Лечебные травы, сироп 100 мл"
+
+    def test_empty_source_text_returns_no_suggestions(self, alias_service: AliasService) -> None:
+        """Пустая строка не запускает подбор и не обращается к базе."""
+        assert alias_service.suggest_certificates("   ") == []
+
+    def test_deduplicates_by_name_and_volume(
+        self, alias_service: AliasService, certificate_repository: CertificateProductRepository
+    ) -> None:
+        """Несколько партий одного товара занимают только одно место в списке.
+
+        Без свёртки товар с тремя сроками годности вытеснил бы из пятёрки
+        предложений действительно разные товары.
+        """
+        certificate_repository.replace_all(
+            [
+                make_certificate(
+                    "Лечебные травы, сироп 100 мл", volume_ml=100.0, certificate_number="A"
+                ),
+                make_certificate(
+                    "Лечебные травы, сироп 100 мл", volume_ml=100.0, certificate_number="B"
+                ),
+                make_certificate(
+                    "Лечебные травы, сироп 100 мл", volume_ml=100.0, certificate_number="C"
+                ),
+            ]
+        )
+
+        suggestions = alias_service.suggest_certificates("TP Herbal syrup 100ml")
+
+        assert len(suggestions) == 1
+
+    def test_limit_is_respected(
+        self, alias_service: AliasService, certificate_repository: CertificateProductRepository
+    ) -> None:
+        """Количество предложений не превышает запрошенный лимит."""
+        certificate_repository.replace_all(
+            [
+                make_certificate(f"Лечебные травы, сироп {volume} мл", volume_ml=float(volume))
+                for volume in (100, 150, 200, 250, 300, 350)
+            ]
+        )
+
+        suggestions = alias_service.suggest_certificates("Лечебные травы сироп", limit=2)
+
+        assert len(suggestions) <= 2

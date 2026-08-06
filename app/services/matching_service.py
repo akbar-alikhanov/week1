@@ -16,8 +16,11 @@ PDF в подборе не участвуют вообще: они находя�
    наименование и объём берутся из самой записи словаря, и по ним
    выполняется строгий поиск в SQLite (``normalized_name`` + ``volume_ml``);
    из найденных строк базы выбирается только ближайшая по сроку годности.
-   Ничего не найдено строго — строка считается ненайденной, к следующим
-   этапам она не переходит.
+   Единственное исключение: если официальный товар из словаря сейчас
+   отсутствует в базе (Excel изменился, товар переименован/удалён), строка
+   не считается ненайденной сразу — разрешается одна повторная попытка через
+   обычный конвейер (этапы 2–4), а результат помечается ``alias_stale`` как
+   сигнал «словарь стоит обновить».
 2. **Точное совпадение** нормализованных наименований.
 3. **Нечёткий поиск** (RapidFuzz) — основной источник кандидатов.
 4. **Семантический поиск** (Sentence Transformers) — подключается, когда
@@ -44,6 +47,7 @@ from app.ai.vector_index import VectorIndex
 from app.config.settings import SettingsService
 from app.core.events import ProgressReporter
 from app.core.text import normalize
+from app.models.alias import Alias
 from app.models.certificate_product import CertificateProduct
 from app.models.matching import (
     MatchCandidate,
@@ -283,10 +287,12 @@ class MatchingService:
         годности: выбирается тот, что ближе всего к требуемой дате заказа.
 
         Если запись словаря для товара есть, а строгий поиск не дал ни одной
-        строки базы, строка считается ненайденной здесь же — подбор не
-        откатывается к нечёткому/семантическому поиску по всей базе: это
-        решение человека, алгоритм не должен его подменять похожим, но не тем
-        товаром (другой объём/партия).
+        строки базы — сам официальный товар из словаря сейчас отсутствует в
+        базе (Excel изменился), а не то, что подбор ошибся в объёме/партии.
+        В этом единственном случае разрешена одна повторная попытка через
+        обычный конвейер (:meth:`_fallback_after_stale_alias`) — так позиция
+        заказа не остаётся без результата только из-за того, что словарь
+        отстал от текущей базы.
 
         Args:
             row: Строка заказа.
@@ -328,15 +334,7 @@ class MatchingService:
             ]
 
         if not certificates:
-            detail = alias.target_name
-            if alias.volume_label:
-                detail += f", {alias.volume_label}"
-            return MatchResult(
-                row=row,
-                status=MatchStatus.NOT_FOUND,
-                alias_applied=True,
-                note=f"Не найден сертификат для товара из словаря: «{detail}»",
-            )
+            return self._fallback_after_stale_alias(row, alias, context)
 
         certificate = _closest_by_expiry(certificates, row.requested_expiry)
         breakdown = score_candidate(row, certificate, lexical=1.0, semantic=None, context=context)
@@ -364,6 +362,43 @@ class MatchingService:
             alias_applied=True,
             note=f"Применён псевдоним «{alias.source_text}»",
         )
+
+    def _fallback_after_stale_alias(
+        self, row: OrderRow, alias: Alias, context: ScoringContext
+    ) -> MatchResult:
+        """Запасной шаг: официальный товар из словаря пропал из базы.
+
+        Единственный случай, когда после срабатывания словаря разрешён
+        обычный конвейер подбора (RapidFuzz/Sentence Transformers) — словарь
+        при этом не игнорируется, а помечается устаревшим (``alias_stale``),
+        чтобы интерфейс предложил пользователю обновить запись на актуальный
+        товар, а не просто молча подменил решение человека своим.
+
+        Args:
+            row: Строка заказа.
+            alias: Псевдоним, чей официальный товар не найден в базе.
+            context: Общий контекст оценки.
+
+        Returns:
+            Результат обычного конвейера подбора с ``alias_stale=True``.
+        """
+        candidates = self._collect_candidates(row, context, limit=context.settings.max_candidates)
+        result = self._decide(row, candidates)
+        result.alias_stale = True
+
+        detail = alias.target_name
+        if alias.volume_label:
+            detail += f", {alias.volume_label}"
+        if result.status.is_resolved:
+            result.note = (
+                f"Товар из словаря «{detail}» не найден в базе — сработал резервный поиск. "
+                "Обновить словарь?"
+            )
+        else:
+            result.note = (
+                f"Товар из словаря «{detail}» не найден в базе; резервный поиск тоже не помог"
+            )
+        return result
 
     def _collect_candidates(
         self,

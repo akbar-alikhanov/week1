@@ -312,7 +312,11 @@ class ApplicationContainer:
     def _create_alias_service(self) -> AliasService:
         """Создаёт сервис псевдонимов."""
         return AliasService(
-            self.alias_repository, self.certificate_repository, self._events, self._paths
+            self.alias_repository,
+            self.certificate_repository,
+            self.matching_service,
+            self._events,
+            self._paths,
         )
 
     def _create_order_service(self) -> OrderProcessingService:

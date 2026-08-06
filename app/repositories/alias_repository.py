@@ -13,7 +13,7 @@ from typing import Any
 
 from app.ai.fuzzy import similarity
 from app.core.exceptions import DuplicateAliasError, ExportError
-from app.core.text import normalize, token_key
+from app.core.text import normalize, strip_code_and_box_quantity, token_key
 from app.models.alias import CONFIDENCE_SQL, Alias
 from app.models.alias_audit import AliasAuditAction, AliasAuditEntry
 from app.repositories.base import BaseRepository
@@ -215,8 +215,9 @@ class AliasRepository(BaseRepository[Alias]):
         for key, value in changes.items():
             setattr(current, key, value)
         if "source_text" in changes:
-            current.normalized_source = normalize(current.source_text)
-            current.token_source = token_key(current.source_text)
+            search_text = strip_code_and_box_quantity(current.source_text)
+            current.normalized_source = normalize(search_text)
+            current.token_source = token_key(search_text)
         current.updated_at = datetime.now()
 
         conflict = self.find_by_normalized_source(current.normalized_source)
@@ -400,7 +401,7 @@ class AliasRepository(BaseRepository[Alias]):
         Returns:
             Количество удалённых записей.
         """
-        normalized = normalize(source_text)
+        normalized = normalize(strip_code_and_box_quantity(source_text))
         rows = self._db.query_all(
             "SELECT id FROM aliases WHERE normalized_source = ?", (normalized,)
         )

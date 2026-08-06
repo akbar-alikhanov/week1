@@ -24,9 +24,10 @@ from app.core.text import normalize
 from app.models.alias import Alias
 from app.models.alias_audit import AliasAuditEntry
 from app.models.certificate_product import CertificateProduct
-from app.models.matching import MatchResult
+from app.models.matching import MatchCandidate, MatchResult
 from app.repositories.alias_repository import AliasRepository
 from app.repositories.certificate_product_repository import CertificateProductRepository
+from app.services.matching_service import MatchingService
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -54,6 +55,7 @@ class AliasService:
         self,
         alias_repository: AliasRepository,
         certificate_repository: CertificateProductRepository,
+        matching_service: MatchingService,
         event_bus: EventBus,
         paths: AppPaths | None = None,
     ) -> None:
@@ -63,11 +65,15 @@ class AliasService:
             alias_repository: Хранилище псевдонимов.
             certificate_repository: База сертификатов (для подсказок и
                 проверки текущих соответствий).
+            matching_service: Сервис подбора (для ИИ-предложений в карточке
+                словаря — используется тот же алгоритм, что и при обработке
+                заказа).
             event_bus: Шина событий приложения.
             paths: Пути приложения (для резервных копий словаря).
         """
         self._aliases = alias_repository
         self._certificates = certificate_repository
+        self._matching = matching_service
         self._events = event_bus
         self._paths = paths
 
@@ -97,6 +103,7 @@ class AliasService:
         alias = Alias(
             source_text=source_text.strip(),
             target_name=certificate.product_name,
+            certificate_product_id=certificate.id,
             volume_ml=certificate.volume_ml,
             weight=weight,
             note=note,
@@ -148,6 +155,7 @@ class AliasService:
         source_text: str,
         target_name: str,
         *,
+        certificate_product_id: int | None = None,
         brand: str = "",
         volume_ml: float | None = None,
         note: str = "",
@@ -161,6 +169,8 @@ class AliasService:
         Args:
             source_text: Системное наименование (как в заказе).
             target_name: Русское наименование товара (как в базе сертификатов).
+            certificate_product_id: Идентификатор выбранной строки базы
+                сертификатов (необязательная подсказка, см. :class:`Alias`).
             brand: Бренд (произвольная заметка).
             volume_ml: Объём товара.
             note: Комментарий.
@@ -174,6 +184,7 @@ class AliasService:
         alias = Alias(
             source_text=source_text.strip(),
             target_name=target_name.strip(),
+            certificate_product_id=certificate_product_id,
             brand=brand,
             volume_ml=volume_ml,
             note=note,
@@ -393,6 +404,42 @@ class AliasService:
             return []
         found = self._certificates.find_strict(normalized, alias.volume_ml)
         return found[:limit]
+
+    def suggest_certificates(self, source_text: str, *, limit: int = 5) -> list[MatchCandidate]:
+        """Подбирает ИИ-предложения для карточки словаря (режим 1).
+
+        Использует тот же алгоритм, что и обычный подбор при обработке заказа
+        (RapidFuzz + Sentence Transformers, с учётом транслитерации и объёма,
+        см. :meth:`~app.services.matching_service.MatchingService.find_candidates`),
+        поэтому предложение здесь и решение при следующей обработке заказа
+        никогда не расходятся. Результат сворачивается к одной записи на
+        уникальную пару «наименование + объём»: без этого товар с несколькими
+        партиями/сроками действия занял бы сразу несколько мест в списке,
+        вытеснив по-настоящему разные товары.
+
+        Args:
+            source_text: Системное наименование товара, как ввёл пользователь.
+            limit: Максимум предложений.
+
+        Returns:
+            Кандидаты, отсортированные по убыванию оценки — не более одного
+            на уникальный товар базы сертификатов.
+        """
+        if not source_text.strip():
+            return []
+        raw = self._matching.find_candidates(source_text, limit=max(limit * 4, 20))
+
+        seen: set[tuple[str, float | None]] = set()
+        unique: list[MatchCandidate] = []
+        for candidate in raw:
+            key = (candidate.certificate.normalized_name, candidate.certificate.volume_ml)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(candidate)
+            if len(unique) >= limit:
+                break
+        return unique
 
     def count(self) -> int:
         """Возвращает количество сохранённых псевдонимов.

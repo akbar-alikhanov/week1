@@ -223,6 +223,26 @@ class TestCreateAndUpdate:
         with pytest.raises(DuplicateAliasError):
             alias_repository.update(999, brand="X")
 
+    def test_update_source_text_recomputes_key_from_cleaned_text(
+        self, alias_repository: AliasRepository
+    ) -> None:
+        """Смена системного названия пересчитывает ключ поиска по очищенному тексту.
+
+        Регрессия: при смене ``source_text`` на полное системное название
+        («61004628 TP Herbal 100ml [48]») ключ поиска должен совпадать с
+        тем, что дал бы ``create()`` с тем же текстом — иначе запись,
+        отредактированная через диалог, переставала бы находиться при
+        подборе заказа.
+        """
+        created = alias_repository.create(Alias(source_text="Товар", target_name="Товар"))
+
+        updated = alias_repository.update(
+            created.id,  # type: ignore[arg-type]
+            source_text="61004628 TP Herbal 100ml [48]",
+        )
+
+        assert updated.normalized_source == "tp herbal 100 ml"
+
 
 class TestFindSimilar:
     """Проверки поиска потенциальных дубликатов."""

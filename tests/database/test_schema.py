@@ -167,3 +167,55 @@ class TestMigrationToTargetVersion:
         assert "normalized_name" in columns
         assert "volume_ml" in columns
         connection.close()
+
+    def test_aliases_gain_certificate_product_id_hint(self, tmp_path: Path) -> None:
+        """После миграции у словаря появляется необязательная подсказка-ссылка.
+
+        Существующие записи (перенесённые ещё из версии 1) получают
+        ``NULL`` — подсказки без выбора пользователя в новом диалоге быть
+        не может, это не то же самое, что прежний обязательный
+        ``certificate_id``.
+        """
+        connection = _seed_v1_database(tmp_path / "legacy.db")
+        apply_migrations(connection)
+
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(aliases)")}
+        assert "certificate_product_id" in columns
+
+        value = connection.execute(
+            "SELECT certificate_product_id FROM aliases WHERE source_text = 'Herbal Doctor Syrup'"
+        ).fetchone()[0]
+        assert value is None
+        connection.close()
+
+    def test_certificate_product_id_hint_is_cleared_on_reimport(self, tmp_path: Path) -> None:
+        """Подсказка ссылается на текущую базу и обнуляется при её замене.
+
+        Полный переимпорт Excel (``DELETE`` + ``INSERT`` в
+        ``certificate_products``) — обычный сценарий, а не редкий случай, и
+        подсказка не должна пережить его как битая ссылка на чужую строку.
+        """
+        connection = sqlite3.connect(tmp_path / "fresh.db")
+        connection.execute("PRAGMA foreign_keys = ON")
+        apply_migrations(connection)
+
+        connection.execute(
+            "INSERT INTO certificate_products (id, product_name) VALUES (1, 'Товар')"
+        )
+        connection.execute(
+            "INSERT INTO aliases "
+            "(source_text, normalized_source, target_name, certificate_product_id, "
+            "created_at, updated_at) "
+            "VALUES ('Псевдоним', 'псевдоним', 'Товар', 1, "
+            "'2025-01-01T00:00:00', '2025-01-01T00:00:00')"
+        )
+        connection.commit()
+
+        connection.execute("DELETE FROM certificate_products")
+        connection.commit()
+
+        value = connection.execute(
+            "SELECT certificate_product_id FROM aliases WHERE source_text = 'Псевдоним'"
+        ).fetchone()[0]
+        assert value is None
+        connection.close()

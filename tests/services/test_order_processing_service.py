@@ -73,7 +73,7 @@ def order_service(tmp_path: Path, database: Database) -> Iterator[OrderProcessin
     backend = EmbeddingBackend(enabled=False)
     vector_index = VectorIndex(backend, None)
     matching = MatchingService(certificates, aliases, settings_service, backend, vector_index)
-    alias_service = AliasService(aliases, certificates, EventBus())
+    alias_service = AliasService(aliases, certificates, matching, EventBus())
 
     service = OrderProcessingService(
         matching,

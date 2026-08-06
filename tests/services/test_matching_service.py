@@ -53,6 +53,11 @@ class TestAliasStage:
     объёма, зафиксированных в самой записи словаря, а выбор между найденными
     строками — только по ближайшему сроку годности. Каждый тест ниже
     проверяет одну грань именно этого требования.
+
+    Документированное исключение: если официальный товар из словаря сейчас
+    отсутствует в базе (``find_strict`` не нашёл ни одной строки), разрешена
+    ровно одна повторная попытка через обычный конвейер — см. класс
+    ``TestAliasFallback`` ниже.
     """
 
     def test_alias_matches_exact_name_and_volume(
@@ -84,6 +89,45 @@ class TestAliasStage:
         assert result.certificate is not None
         assert result.certificate.certificate_number == "aliased"
         assert result.candidates[0].source is MatchSource.ALIAS
+
+    def test_alias_saved_with_raw_system_name_is_found_by_cleaned_order_text(
+        self,
+        matching_service: MatchingService,
+        certificate_repository: CertificateProductRepository,
+        alias_repository: AliasRepository,
+    ) -> None:
+        """Регрессия: словарь, сохранённый с полным системным названием,
+        должен находиться при подборе заказа — а не только с уже очищенным.
+
+        Диалог словаря просит вставить название ЦЕЛИКОМ, как в заказе
+        («61004628 TP Herbal 100ml [48]»), чтобы разобрать код/тип/объём/
+        упаковку для показа пользователю. Строка заказа при подборе всегда
+        ищется в очищенном виде (без кода и отметки количества в коробке,
+        см. ``OrderRow.search_text``) — если бы словарь сохранял ключ поиска
+        по НЕ очищенному тексту, такая запись никогда бы не находилась.
+        """
+        certificate = make_certificate(
+            "Лечебные травы 100 мл",
+            volume_ml=100.0,
+            expiry_date=_FUTURE,
+            certificate_number="aliased",
+        )
+        certificate_repository.replace_all([certificate])
+        raw_system_name = "61004628 TP Herbal 100ml [48]"
+        alias_repository.save(
+            Alias(
+                source_text=raw_system_name,
+                target_name=certificate.product_name,
+                volume_ml=100.0,
+            )
+        )
+
+        result = matching_service.match_row(OrderRow(row_number=1, product_name=raw_system_name))
+
+        assert result.alias_applied
+        assert result.status is MatchStatus.MATCHED
+        assert result.certificate is not None
+        assert result.certificate.certificate_number == "aliased"
 
     def test_alias_ignores_lexically_similar_certificate_with_different_name(
         self,
@@ -412,7 +456,10 @@ class TestAliasStage:
         certificate_repository: CertificateProductRepository,
         alias_repository: AliasRepository,
     ) -> None:
-        """Если строки базы на объём, зафиксированный в словаре, нет — статус «не найден»."""
+        """Если строки базы на объём, зафиксированный в словаре, нет и резервный поиск
+        по тексту заказа тоже ничего не находит — статус «не найден», но помечен
+        как результат резервного пути (``alias_stale``), а не прямого решения словаря.
+        """
         certificate_repository.replace_all(
             [
                 make_certificate(
@@ -426,22 +473,23 @@ class TestAliasStage:
 
         result = matching_service.match_row(OrderRow(row_number=1, product_name="TP Kh 100ml"))
 
-        assert result.alias_applied
+        assert result.alias_stale
+        assert not result.alias_applied
         assert result.status is MatchStatus.NOT_FOUND
         assert result.certificate is None
-        assert result.note == "Не найден сертификат для товара из словаря: «Товар Х, 100 мл»"
 
-    def test_alias_strict_miss_does_not_fall_back_to_fuzzy_search(
+    def test_alias_strict_miss_falls_back_but_lookalike_stays_not_found(
         self,
         matching_service: MatchingService,
         certificate_repository: CertificateProductRepository,
         alias_repository: AliasRepository,
     ) -> None:
-        """Провал строгого подбора по словарю не подменяется похожим товаром.
+        """Провал строгого подбора по словарю не подменяется похожим товаром молча.
 
-        Есть лексически похожая строка базы другого объёма, которую обычный
-        нечёткий поиск нашёл бы — но раз товар распознан по словарю, подбор
-        должен остановиться на «не найдено», а не тихо подставить её.
+        Есть лексически похожая строка базы другого объёма — резервный поиск
+        (по тексту заказа, а не по данным словаря) её тоже не считает
+        уверенным совпадением, поэтому решение остаётся «не найдено», а не
+        тихая подмена на непохожий по объёму товар.
         """
         lookalike = make_certificate(
             "Товар Х", volume_ml=250.0, expiry_date=_FUTURE, certificate_number="lookalike"
@@ -453,6 +501,7 @@ class TestAliasStage:
 
         result = matching_service.match_row(OrderRow(row_number=1, product_name="TP Kh 100ml"))
 
+        assert result.alias_stale
         assert result.status is MatchStatus.NOT_FOUND
         assert result.certificate is None
 
@@ -469,6 +518,67 @@ class TestAliasStage:
         result = matching_service.match_row(OrderRow(row_number=1, product_name="TP Kh 100ml"))
 
         assert result.status is MatchStatus.NOT_FOUND
+        assert result.alias_stale
+
+
+class TestAliasFallback:
+    """Проверки резервного пути (шаг 4 алгоритма): официальный товар из
+    словаря пропал из базы, но текст самого заказа всё ещё узнаваем.
+    """
+
+    def test_fallback_finds_certificate_by_order_text_when_dictionary_target_is_gone(
+        self,
+        matching_service: MatchingService,
+        certificate_repository: CertificateProductRepository,
+        alias_repository: AliasRepository,
+    ) -> None:
+        """Товар из словаря переименован/удалён — резервный поиск находит замену
+        по исходному тексту заказа и помечает результат для обновления словаря.
+        """
+        certificate_repository.replace_all(
+            [
+                make_certificate(
+                    "Витамин С 500мг",
+                    volume_ml=500.0,
+                    expiry_date=_FUTURE,
+                    certificate_number="VITC",
+                )
+            ]
+        )
+        alias_repository.save(
+            Alias(
+                source_text="Витамин С 500мг",
+                target_name="Устаревшее название, которого больше нет в базе",
+                volume_ml=500.0,
+            )
+        )
+
+        result = matching_service.match_row(OrderRow(row_number=1, product_name="Витамин С 500мг"))
+
+        assert result.alias_stale
+        assert not result.alias_applied
+        assert result.status is MatchStatus.MATCHED
+        assert result.certificate is not None
+        assert result.certificate.certificate_number == "VITC"
+        assert "обновить словарь" in result.note.lower()
+
+    def test_fallback_not_triggered_when_alias_resolves_normally(
+        self,
+        matching_service: MatchingService,
+        certificate_repository: CertificateProductRepository,
+        alias_repository: AliasRepository,
+    ) -> None:
+        """Когда словарь разрешается штатно, ``alias_stale`` не выставляется."""
+        certificate_repository.replace_all(
+            [make_certificate("Товар", volume_ml=1.0, expiry_date=_FUTURE, certificate_number="1")]
+        )
+        alias_repository.save(Alias(source_text="Псевдоним", target_name="Товар", volume_ml=1.0))
+
+        result = matching_service.match_row(OrderRow(row_number=1, product_name="Псевдоним"))
+
+        assert result.status is MatchStatus.MATCHED
+        assert not result.alias_stale
+        assert result.alias_applied
 
 
 class TestLexicalStage:

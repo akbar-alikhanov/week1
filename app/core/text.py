@@ -201,6 +201,14 @@ _STOPWORDS: Final[frozenset[str]] = frozenset(
 #: Символы, которые полностью удаляются перед разбором.
 _NOISE_CHARACTERS: Final[str] = "®™©℠°"
 
+#: Код товара в начале системного наименования: «61004628 TP Dr Rabbit...».
+#: Сертификаты такого кода не содержат, поэтому для подбора он лишний шум.
+_RE_LEADING_PRODUCT_CODE: Final[re.Pattern[str]] = re.compile(r"^\s*\d{4,}\s+")
+
+#: Количество в коробке в конце наименования: «...50ml [48]». Как и код
+#: товара, в тексте сертификата этой отметки нет.
+_RE_TRAILING_BOX_QUANTITY: Final[re.Pattern[str]] = re.compile(r"(?:\s*\[[^\]]*\]\s*)+$")
+
 _RE_WHITESPACE: Final[re.Pattern[str]] = re.compile(r"\s+")
 _RE_NON_ALNUM: Final[re.Pattern[str]] = re.compile(r"[^0-9a-zA-Zа-яёўқғҳ\s.,]", re.UNICODE)
 _RE_UNIT_BOUNDARY: Final[re.Pattern[str]] = re.compile(
@@ -229,6 +237,33 @@ def collapse_whitespace(text: str) -> str:
         Строка без ведущих/замыкающих пробелов и с одиночными разделителями.
     """
     return _RE_WHITESPACE.sub(" ", text).strip()
+
+
+def strip_code_and_box_quantity(text: str) -> str:
+    """Убирает код товара и отметку «[количество в коробке]» из названия.
+
+    Системное наименование в заказе оформлено как «61004628 TP Herbal 100ml
+    [48]»: числовой код товара спереди и количество в коробке в квадратных
+    скобках в конце — ни того, ни другого нет в тексте сертификата, и код
+    вдобавок мог бы перевесить совпадение по смыслу при нечётком и
+    семантическом сравнении.
+
+    Это единый ключ очистки для двух мест, которым обязательно давать
+    одинаковый результат на одном и том же тексте: строки заказа
+    (:attr:`app.models.order.OrderRow.search_text`) и словаря соответствий
+    (:class:`app.models.alias.Alias`) — иначе психология пользователя,
+    вставившего в словарь ту же строку, что придёт в заказе, не сработает:
+    псевдоним просто не найдётся при подборе.
+
+    Args:
+        text: Наименование товара, как оно записано в заказе.
+
+    Returns:
+        Наименование без кода товара и отметки количества в коробке.
+    """
+    stripped = _RE_LEADING_PRODUCT_CODE.sub("", text)
+    stripped = _RE_TRAILING_BOX_QUANTITY.sub("", stripped)
+    return collapse_whitespace(stripped)
 
 
 def strip_accents(text: str) -> str:

@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Final
 
-from app.core.text import normalize, token_key
+from app.core.text import normalize, strip_code_and_box_quantity, token_key
 from app.core.units import Volume
 
 #: Сколько раз псевдоним, созданный не пользователем, должен быть применён,
@@ -41,10 +41,15 @@ class Alias:
     ищутся в базе сертификатов строгим равенством, без права на откат к
     нечёткому/семантическому подбору.
 
-    Запись не привязана к конкретной строке базы сертификатов (нет
-    ``certificate_id``): при каждом подборе она заново разрешается в текущие
+    Строгий подбор при обработке заказа не привязан к конкретной строке базы
+    сертификатов: при каждом подборе запись заново разрешается в текущие
     строки базы по паре «нормализованное наименование + объём», поэтому
     связь никогда не устаревает после переимпорта Excel.
+    ``certificate_product_id`` хранится отдельно и только как необязательная
+    подсказка (какую именно строку выбрал пользователь при сохранении) — для
+    отображения и трассировки, а не для подбора: строка ``FOREIGN KEY ...
+    ON DELETE SET NULL`` в схеме сама обнуляет её при переимпорте Excel,
+    когда прежний идентификатор неизбежно устаревает.
 
     Attributes:
         id: Первичный ключ (``None`` до сохранения).
@@ -52,6 +57,8 @@ class Alias:
         normalized_source: Каноническая форма исходного наименования — ключ поиска.
         token_source: Токен-ключ, инвариантный к порядку слов.
         target_name: Русское наименование товара (как в базе сертификатов).
+        certificate_product_id: Идентификатор строки базы сертификатов,
+            выбранной при сохранении (необязательная подсказка, см. выше).
         brand: Бренд товара (произвольная заметка пользователя).
         volume_ml: Объём товара в базовых единицах (обычно мл).
         weight: Приоритет псевдонима при конфликте (больше — важнее).
@@ -69,6 +76,7 @@ class Alias:
     normalized_source: str = ""
     token_source: str = ""
     target_name: str = ""
+    certificate_product_id: int | None = None
     brand: str = ""
     volume_ml: float | None = None
     weight: float = 1.0
@@ -81,11 +89,21 @@ class Alias:
     note: str = ""
 
     def __post_init__(self) -> None:
-        """Вычисляет ключи поиска по исходному тексту."""
+        """Вычисляет ключи поиска по исходному тексту.
+
+        Ключи считаются от текста, очищенного от кода товара и отметки
+        количества в коробке (:func:`~app.core.text.strip_code_and_box_quantity`)
+        — той же функцией, что и :attr:`~app.models.order.OrderRow.search_text`.
+        Без этого запись, сохранённая с полным системным названием («61004628
+        TP Herbal 100ml [48]»), никогда не находилась бы при подборе: там
+        строка заказа ищется уже в очищенном виде. ``source_text`` при этом
+        не меняется — он остаётся как ввёл пользователь, для отображения.
+        """
+        search_text = strip_code_and_box_quantity(self.source_text)
         if not self.normalized_source:
-            self.normalized_source = normalize(self.source_text)
+            self.normalized_source = normalize(search_text)
         if not self.token_source:
-            self.token_source = token_key(self.source_text)
+            self.token_source = token_key(search_text)
 
     @property
     def is_valid(self) -> bool:
@@ -158,6 +176,7 @@ class Alias:
             "normalized_source": self.normalized_source,
             "token_source": self.token_source,
             "target_name": self.target_name,
+            "certificate_product_id": self.certificate_product_id,
             "brand": self.brand,
             "volume_ml": self.volume_ml,
             "weight": self.weight,
@@ -189,6 +208,7 @@ class Alias:
             normalized_source=data.get("normalized_source") or "",
             token_source=data.get("token_source") or "",
             target_name=data.get("target_name") or "",
+            certificate_product_id=data.get("certificate_product_id"),
             brand=data.get("brand") or "",
             volume_ml=data.get("volume_ml"),
             weight=float(data.get("weight") or 1.0),

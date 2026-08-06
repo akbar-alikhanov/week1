@@ -154,6 +154,9 @@ class MatchResult:
         duration_ms: Время подбора в миллисекундах.
         note: Пояснение (причина неоднозначности или отсутствия результата).
         alias_applied: Признак того, что решение принято по таблице псевдонимов.
+        alias_stale: Признак того, что запись словаря есть, но официальный
+            товар из неё сейчас отсутствует в базе сертификатов — результат
+            получен запасным путём (ИИ-поиск), и словарь стоит обновить.
     """
 
     row: OrderRow
@@ -163,6 +166,7 @@ class MatchResult:
     duration_ms: float = 0.0
     note: str = ""
     alias_applied: bool = False
+    alias_stale: bool = False
 
     @property
     def selected(self) -> MatchCandidate | None:

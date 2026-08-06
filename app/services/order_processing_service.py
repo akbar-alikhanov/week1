@@ -264,12 +264,29 @@ class OrderProcessingService:
 
     # ------------------------------------------------------------- шаги
     def _resolve_ambiguities(self, outcome: ProcessingOutcome, request: ProcessingRequest) -> None:
-        """Передаёт неоднозначные результаты на разрешение пользователю."""
+        """Передаёт неоднозначные результаты на разрешение пользователю.
+
+        Помимо обычной неоднозначности (несколько близких кандидатов), сюда
+        же попадают результаты с ``alias_stale`` — официальный товар из
+        словаря сейчас отсутствует в базе, и резервный поиск нашёл замену
+        через обычный конвейер (см.
+        :meth:`~app.services.matching_service.MatchingService._fallback_after_stale_alias`).
+        Такое решение нельзя молча подставлять вместо того, что хранится в
+        словаре, — пользователь должен подтвердить его так же, как обычный
+        неоднозначный выбор; галочка «Запомнить выбор» в том же диалоге и
+        есть предложение обновить словарь (``learn_from_result`` обновит
+        существующую запись новым товаром).
+        """
         resolver = request.resolve_ambiguities
         if resolver is None:
             return
 
-        pending = [result for result in outcome.results if result.status is MatchStatus.AMBIGUOUS]
+        pending = [
+            result
+            for result in outcome.results
+            if result.status is MatchStatus.AMBIGUOUS
+            or (result.alias_stale and result.status is MatchStatus.MATCHED)
+        ]
         if not pending:
             return
 

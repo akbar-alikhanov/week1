@@ -28,6 +28,7 @@ from app.gui.widgets.dialogs import ask_confirmation
 from app.gui.widgets.search_entry import SearchEntry
 from app.models.alias import Alias
 from app.models.certificate_product import CertificateProduct
+from app.models.matching import MatchCandidate
 from app.services.alias_service import DuplicateWarning
 
 _LOGGER = logging.getLogger(__name__)
@@ -624,7 +625,10 @@ class AliasesView(BaseView):
         """Открывает окно добавления новой записи словаря."""
         self.ensure_built()
         dialog = AliasEditDialog(
-            self.app, self.theme, search_certificates=self._search_certificates
+            self.app,
+            self.theme,
+            search_certificates=self._search_certificates,
+            suggest_certificates=self._suggest_certificates,
         )
         result = dialog.wait_result()
         if result is None:
@@ -644,7 +648,11 @@ class AliasesView(BaseView):
         if alias is None:
             return
         dialog = AliasEditDialog(
-            self.app, self.theme, search_certificates=self._search_certificates, alias=alias
+            self.app,
+            self.theme,
+            search_certificates=self._search_certificates,
+            suggest_certificates=self._suggest_certificates,
+            alias=alias,
         )
         result = dialog.wait_result()
         if result is None:
@@ -652,8 +660,12 @@ class AliasesView(BaseView):
         self._commit_edit(alias, result)
 
     def _search_certificates(self, query: str) -> list[CertificateProduct]:
-        """Ищет позиции базы сертификатов для окна добавления/редактирования."""
+        """Ищет позиции базы сертификатов для ручного поиска в диалоге."""
         return self.app.container.certificate_repository.search(query, limit=15)
+
+    def _suggest_certificates(self, source_text: str) -> list[MatchCandidate]:
+        """Подбирает ИИ-предложения для окна добавления/редактирования."""
+        return self.app.container.alias_service.suggest_certificates(source_text, limit=5)
 
     def _commit_new(self, result: dict[str, Any]) -> None:
         """Сохраняет новую запись после проверки на дубликаты."""
@@ -666,6 +678,7 @@ class AliasesView(BaseView):
             service.add(
                 result["source_text"],
                 result["target_name"],
+                certificate_product_id=result["certificate_product_id"],
                 brand=result["brand"],
                 volume_ml=result["volume_ml"],
                 note=result["note"],
@@ -693,6 +706,7 @@ class AliasesView(BaseView):
                 alias.id,
                 source_text=result["source_text"],
                 target_name=result["target_name"],
+                certificate_product_id=result["certificate_product_id"],
                 brand=result["brand"],
                 volume_ml=result["volume_ml"],
                 note=result["note"],

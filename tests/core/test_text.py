@@ -10,6 +10,7 @@ from app.core.text import (
     fix_homoglyphs,
     normalize,
     shorten,
+    strip_code_and_box_quantity,
     token_key,
     tokenize,
     transliterate,
@@ -149,6 +150,23 @@ class TestAlphaSignature:
     def test_different_products_differ(self) -> None:
         """Разные товары дают разные сигнатуры."""
         assert alpha_signature("Крем детский") != alpha_signature("Крем взрослый")
+
+
+class TestStripCodeAndBoxQuantity:
+    """Проверки очистки системного названия от кода товара и упаковки."""
+
+    def test_strips_leading_code_and_trailing_brackets(self) -> None:
+        """Пример из требований: код спереди и количество в коробке в конце."""
+        result = strip_code_and_box_quantity("61004628 TP Dr Rabbit Kids Bubblegum 50ml [48]")
+        assert result == "TP Dr Rabbit Kids Bubblegum 50ml"
+
+    def test_text_without_code_or_brackets_untouched(self) -> None:
+        """Строка без кода и без отметки количества не меняется."""
+        assert strip_code_and_box_quantity("TP Herbal 100ml") == "TP Herbal 100ml"
+
+    def test_short_leading_number_is_not_treated_as_code(self) -> None:
+        """Короткое число (меньше четырёх цифр) не принимается за код товара."""
+        assert strip_code_and_box_quantity("100 Крем детский") == "100 Крем детский"
 
 
 class TestShorten:

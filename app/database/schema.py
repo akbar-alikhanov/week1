@@ -522,6 +522,30 @@ def _migration_004_excel_source(connection: sqlite3.Connection) -> None:
     connection.executescript(_SCHEMA_V4)
 
 
+#: Подсказка «какую строку базы выбрал пользователь» в словаре (версия 5).
+#:
+#: Строгий подбор при обработке заказа по-прежнему ищет только по паре
+#: «наименование + объём» (см. ``find_strict``) — это поле не участвует в
+#: подборе и не может участвовать, потому что переимпорт Excel всегда меняет
+#: идентификаторы строк. ``ON DELETE SET NULL`` как раз и нужен, чтобы
+#: подсказка сама обнулялась при переимпорте, а не указывала на чужую строку.
+_SCHEMA_V5: Final[str] = """
+ALTER TABLE aliases ADD COLUMN certificate_product_id INTEGER
+    REFERENCES certificate_products (id) ON DELETE SET NULL;
+
+CREATE INDEX idx_aliases_certificate_product ON aliases (certificate_product_id);
+"""
+
+
+def _migration_005_alias_certificate_hint(connection: sqlite3.Connection) -> None:
+    """Добавляет в словарь необязательную ссылку на выбранную строку базы.
+
+    Args:
+        connection: Открытое соединение SQLite.
+    """
+    connection.executescript(_SCHEMA_V5)
+
+
 def _try_create_fts(connection: sqlite3.Connection) -> None:
     """Создаёт полнотекстовый индекс, если сборка SQLite поддерживает FTS5.
 
@@ -543,6 +567,7 @@ MIGRATIONS: Final[dict[int, Callable[[sqlite3.Connection], None]]] = {
     2: _migration_002_alias_manager,
     3: _migration_003_multi_row_certificates,
     4: _migration_004_excel_source,
+    5: _migration_005_alias_certificate_hint,
 }
 
 #: Целевая версия схемы.
