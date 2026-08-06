@@ -337,7 +337,12 @@ def run(argv: list[str] | None = None) -> int:
         print("\nПрервано пользователем", file=sys.stderr)
         return 130
     finally:
-        container.shutdown()
+        # Последняя точка кода перед завершением процесса — исключение
+        # отсюда никто дальше не поймает, поэтому оно гасится здесь.
+        try:
+            container.shutdown()
+        except Exception:
+            _LOGGER.exception("Не удалось корректно завершить работу приложения")
 
 
 if __name__ == "__main__":

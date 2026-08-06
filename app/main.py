@@ -142,7 +142,16 @@ def run_gui_mode(argv: list[str]) -> int:
         _LOGGER.exception("Аварийное завершение графического интерфейса")
         return 1
     finally:
-        container.shutdown()
+        # ApplicationWindow.on_close() уже вызывает container.shutdown() при
+        # закрытии окна — это повторный, идемпотентный вызов на случай, если
+        # окно было уничтожено в обход on_close() (например, аварийно). Он
+        # не должен ронять процесс исключением ни при каких обстоятельствах:
+        # это последняя точка кода перед завершением работы, поймать
+        # исключение здесь больше некому.
+        try:
+            container.shutdown()
+        except Exception:
+            _LOGGER.exception("Не удалось корректно завершить работу приложения")
 
 
 def _show_startup_failure(details: str) -> None:

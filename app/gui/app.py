@@ -525,7 +525,10 @@ class ApplicationWindow(ctk.CTk):
             self.animator.stop_all()
             self.container.shutdown()
         except Exception:
-            _LOGGER.debug("Ошибка при завершении работы", exc_info=True)
+            # container.shutdown() идемпотентен и не должен бросать исключений
+            # в штатной работе — если всё же дошло сюда, это стоит видеть в
+            # журнале, а не прятать на уровне DEBUG.
+            _LOGGER.exception("Ошибка при завершении работы")
 
         _LOGGER.info("Приложение закрыто")
         self.destroy()

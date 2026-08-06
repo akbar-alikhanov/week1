@@ -61,6 +61,7 @@ class ApplicationContainer:
         self._paths = paths
         self._events = EventBus()
         self._log_handler: MemoryLogHandler | None = get_memory_handler()
+        self._shut_down = False
 
         self._settings_service = Lazy(self._create_settings_service)
         self._database = Lazy(self._create_database)
@@ -253,10 +254,28 @@ class ApplicationContainer:
         _LOGGER.info("Приложение инициализировано (%s)", self._paths.base)
 
     def shutdown(self) -> None:
-        """Корректно завершает работу всех подсистем."""
+        """Корректно завершает работу всех подсистем.
+
+        Порядок важен и не подлежит перестановке: сначала до конца
+        дожидаемся фоновых задач (``wait=True`` — без этого поток мог бы
+        всё ещё писать в базу в момент, когда главный поток уже приступает
+        к ``checkpoint()``/``close()``), затем выгружаем модель эмбеддингов,
+        и только после этого — контрольная точка WAL и закрытие соединений.
+
+        Идемпотентен: приложение закрывает соединения и из
+        ``ApplicationWindow.on_close()`` (сразу после закрытия окна), и из
+        ``finally`` в точке входа (:func:`app.main.run_gui_mode`,
+        :func:`app.cli.run`) — второй вызов должен быть безопасным
+        безусловно, поэтому после первого выполнения метод сразу
+        возвращается, не трогая уже остановленные подсистемы.
+        """
+        if self._shut_down:
+            return
+        self._shut_down = True
+
         _LOGGER.info("Завершение работы приложения…")
         if self._background_pool.initialized:
-            self.background_pool.shutdown(wait=False)
+            self.background_pool.shutdown(wait=True)
         if self._embedding_backend.initialized:
             self.embedding_backend.unload()
         if self._database.initialized:

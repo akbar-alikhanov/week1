@@ -262,11 +262,25 @@ class Database:
             _LOGGER.debug("ANALYZE не выполнен: %s", error)
 
     def checkpoint(self) -> None:
-        """Переносит содержимое WAL-журнала в основной файл базы."""
-        try:
-            self.connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        except sqlite3.Error as error:  # pragma: no cover
-            _LOGGER.debug("Контрольная точка WAL не выполнена: %s", error)
+        """Переносит содержимое WAL-журнала в основной файл базы.
+
+        Контрольная точка — вспомогательная операция для надёжности хранения,
+        а не обязательный шаг: ошибка здесь никогда не должна прерывать
+        завершение работы приложения, поэтому исключения гасятся так же, как
+        и при обычных сбоях SQLite. В частности, вызов после :meth:`close`
+        (например, при повторном ``shutdown()`` — см.
+        :class:`~app.core.container.ApplicationContainer`) тихо ничего не
+        делает вместо того, чтобы бросить :class:`DatabaseError`: та же
+        блокировка, что и у :meth:`close`, исключает состояние гонки между
+        ними в многопоточном сценарии.
+        """
+        with self._lock:
+            if self._closed:
+                return
+            try:
+                self.connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            except sqlite3.Error as error:  # pragma: no cover
+                _LOGGER.debug("Контрольная точка WAL не выполнена: %s", error)
 
     def backup_to(self, destination: Path) -> Path:
         """Создаёт согласованную резервную копию базы.
