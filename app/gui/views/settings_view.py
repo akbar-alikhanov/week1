@@ -27,6 +27,9 @@ _LOGGER = logging.getLogger(__name__)
 #: Задержка перед записью настроек на диск, мс.
 _SAVE_DELAY_MS = 600
 
+#: Имя фоновой задачи импорта базы сроков годности.
+_TASK_IMPORT_EXPIRY = "import-expiry-stock"
+
 
 class SettingsView(BaseView):
     """Настройки алгоритма, индексации, результата и интерфейса."""
@@ -62,6 +65,7 @@ class SettingsView(BaseView):
 
         self._build_matching_section()
         self._build_certificates_section()
+        self._build_expiry_stock_section()
         self._build_export_section()
         self._build_interface_section()
         self._build_maintenance_section()
@@ -305,6 +309,116 @@ class SettingsView(BaseView):
             icon="refresh",
             command=lambda: self.app.navigate("dashboard", action="reimport"),
         ).pack(side="left")
+
+    # ------------------------------------------------------- база сроков годности
+    def _build_expiry_stock_section(self) -> None:
+        """Создаёт группу настроек источника данных о сроках годности и остатках."""
+        card = self._card(
+            "База сроков годности",
+            "Отдельная Excel-таблица остатков — используется, чтобы подобрать "
+            "срок годности ДО поиска сертификата (этап выполняется автоматически)",
+            "chart",
+        )
+        expiry_stock = self._settings.expiry_stock
+
+        self._path_row(
+            card.content,
+            "Файл базы сроков годности",
+            "Excel: полное системное название товара, срок годности, количество",
+            expiry_stock.excel_path,
+            lambda value: self._set("expiry_stock", "excel_path", value),
+            file_mode=True,
+        )
+        self._switch_row(
+            card.content,
+            "Проверять изменения при запуске",
+            "Если Excel-файл изменился со времени последнего импорта — переимпортировать его",
+            expiry_stock.rescan_on_start,
+            lambda value: self._set("expiry_stock", "rescan_on_start", value),
+        )
+
+        self._expiry_stock_label = ctk.CTkLabel(
+            card.content,
+            text="",
+            font=self.theme.font(FontRole.CAPTION),
+            text_color=self.theme.color("text_muted"),
+            anchor="w",
+            justify="left",
+        )
+        self._expiry_stock_label.pack(fill="x", pady=(Spacing.MD, Spacing.SM))
+        self._update_expiry_stock_label()
+
+        buttons = ctk.CTkFrame(card.content, fg_color="transparent", width=0, height=0)
+        buttons.pack(fill="x", pady=(Spacing.SM, 0))
+        self._expiry_import_button = secondary_button(
+            buttons,
+            self.theme,
+            text="Импортировать заново",
+            icon="refresh",
+            command=self._reimport_expiry_stock,
+        )
+        self._expiry_import_button.pack(side="left")
+
+    def _update_expiry_stock_label(self) -> None:
+        """Обновляет сводку о состоянии базы сроков годности."""
+        try:
+            stats = self.app.container.expiry_stock_repository.statistics()
+            imported_at = self.app.container.expiry_import_service.last_imported_at()
+            text = (
+                f"Партий: {stats.get('total', 0)} · "
+                f"уникальных товаров: {stats.get('unique_products', 0)}"
+            )
+            text += (
+                f" · последний импорт {imported_at}" if imported_at else " · импорт не выполнялся"
+            )
+            self._expiry_stock_label.configure(text=text)
+        except Exception:
+            pass
+
+    def _reimport_expiry_stock(self) -> None:
+        """Запускает (пере)импорт Excel-базы сроков годности в фоновом потоке."""
+        path_text = self._settings.expiry_stock.excel_path
+        path = Path(path_text) if path_text else None
+        if path is None or not path.is_file():
+            self.app.toasts.warning("Сначала выберите файл базы сроков годности")
+            return
+        if self.app.tasks.is_running(_TASK_IMPORT_EXPIRY):
+            self.app.toasts.info("Импорт уже выполняется")
+            return
+
+        service = self.app.container.expiry_import_service
+        try:
+            self._expiry_import_button.configure(state="disabled")
+        except Exception:
+            pass
+
+        def _work(_reporter: Any) -> Any:
+            return service.import_file(path)
+
+        def _done(result: Any) -> None:
+            self._update_expiry_stock_label()
+            summary = result.summary("База сроков годности")
+            if result.failed:
+                self.app.toasts.warning(summary, title="Импорт не выполнен")
+            else:
+                self.app.toasts.success(summary, title="База сроков годности обновлена")
+
+        def _error(error: Exception) -> None:
+            self.app.show_error("Импорт базы сроков годности не выполнен", str(error))
+
+        def _finished() -> None:
+            try:
+                self._expiry_import_button.configure(state="normal")
+            except Exception:
+                pass
+
+        self.app.tasks.run(
+            _TASK_IMPORT_EXPIRY,
+            _work,
+            on_success=_done,
+            on_error=_error,
+            on_finally=_finished,
+        )
 
     # -------------------------------------------------------------- результат
     def _build_export_section(self) -> None:

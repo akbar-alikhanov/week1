@@ -546,6 +546,36 @@ def _migration_005_alias_certificate_hint(connection: sqlite3.Connection) -> Non
     connection.executescript(_SCHEMA_V5)
 
 
+#: База сроков годности и остатков (версия 6) — отдельный источник данных,
+#: не связанный с базой сертификатов. Отвечает на вопрос «какие партии
+#: этого товара сейчас есть на складе и когда у них истекает срок»,
+#: используется новым этапом подбора срока годности ПЕРЕД поиском
+#: сертификата (см. ``app.services.expiry_resolution_service``), который
+#: этот поиск не подменяет и не изменяет.
+_SCHEMA_V6: Final[str] = """
+CREATE TABLE expiry_stock (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    product_name        TEXT    NOT NULL,
+    normalized_name     TEXT    NOT NULL DEFAULT '',
+    expiry_date         TEXT,
+    quantity            REAL    NOT NULL DEFAULT 0,
+    source_row          INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX idx_expiry_stock_normalized ON expiry_stock (normalized_name);
+CREATE INDEX idx_expiry_stock_lookup ON expiry_stock (normalized_name, expiry_date);
+"""
+
+
+def _migration_006_expiry_stock(connection: sqlite3.Connection) -> None:
+    """Добавляет таблицу базы сроков годности и остатков.
+
+    Args:
+        connection: Открытое соединение SQLite.
+    """
+    connection.executescript(_SCHEMA_V6)
+
+
 def _try_create_fts(connection: sqlite3.Connection) -> None:
     """Создаёт полнотекстовый индекс, если сборка SQLite поддерживает FTS5.
 
@@ -568,6 +598,7 @@ MIGRATIONS: Final[dict[int, Callable[[sqlite3.Connection], None]]] = {
     3: _migration_003_multi_row_certificates,
     4: _migration_004_excel_source,
     5: _migration_005_alias_certificate_hint,
+    6: _migration_006_expiry_stock,
 }
 
 #: Целевая версия схемы.

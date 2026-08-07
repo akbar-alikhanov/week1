@@ -157,6 +157,19 @@ class MatchResult:
         alias_stale: Признак того, что запись словаря есть, но официальный
             товар из неё сейчас отсутствует в базе сертификатов — результат
             получен запасным путём (ИИ-поиск), и словарь стоит обновить.
+        expiry_not_in_database: Признак того, что этап подбора срока
+            годности (:class:`~app.services.expiry_resolution_service.ExpiryResolutionService`,
+            выполняется ДО подбора сертификата) не нашёл товар в базе
+            сроков годности вообще — подбор сертификата для строки поэтому
+            не выполнялся. Требует отдельного визуального выделения в
+            итоговом Excel (жёлтая заливка и зачёркнутый текст).
+        expiry_auto_resolved: Признак того, что требуемый срок годности
+            (:attr:`~app.models.order.OrderRow.requested_expiry`) в заказе
+            изначально отсутствовал и был подобран новым этапом
+            (:class:`~app.services.expiry_resolution_service.ExpiryResolutionService`).
+            Только при этом признаке колонка «требуемый срок» исходного
+            заказа заполняется в итоговом Excel — если срок уже был указан
+            в заказе, колонка остаётся нетронутой независимо от этого поля.
     """
 
     row: OrderRow
@@ -167,6 +180,8 @@ class MatchResult:
     note: str = ""
     alias_applied: bool = False
     alias_stale: bool = False
+    expiry_not_in_database: bool = False
+    expiry_auto_resolved: bool = False
 
     @property
     def selected(self) -> MatchCandidate | None:

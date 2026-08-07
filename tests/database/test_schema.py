@@ -219,3 +219,72 @@ class TestMigrationToTargetVersion:
         ).fetchone()[0]
         assert value is None
         connection.close()
+
+
+class TestExpiryStockMigration:
+    """Проверки миграции версии 6 — таблица базы сроков годности и остатков."""
+
+    def test_table_created_empty(self, tmp_path: Path) -> None:
+        """Новая таблица создаётся с ожидаемыми колонками, но без строк.
+
+        Как и с базой сертификатов (версия 4), у нового источника данных нет
+        отображения на что-либо из предыдущих версий схемы — данные впредь
+        поступают только из импорта Excel-файла пользователя.
+        """
+        connection = _seed_v1_database(tmp_path / "legacy.db")
+        apply_migrations(connection)
+
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(expiry_stock)")}
+        assert columns == {
+            "id",
+            "product_name",
+            "normalized_name",
+            "expiry_date",
+            "quantity",
+            "source_row",
+        }
+        count = connection.execute("SELECT count(*) FROM expiry_stock").fetchone()[0]
+        assert count == 0
+        connection.close()
+
+    def test_lookup_indexes_created(self, tmp_path: Path) -> None:
+        """Индексы поиска по названию и по паре «название + срок» создаются."""
+        connection = sqlite3.connect(tmp_path / "fresh.db")
+        apply_migrations(connection)
+
+        indexes = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'expiry_stock'"
+            )
+        }
+        assert "idx_expiry_stock_normalized" in indexes
+        assert "idx_expiry_stock_lookup" in indexes
+        connection.close()
+
+    def test_fresh_database_reaches_target_version_directly(self, tmp_path: Path) -> None:
+        """Новая (пустая) база тоже получает таблицу базы сроков годности."""
+        connection = sqlite3.connect(tmp_path / "fresh.db")
+        result_version = apply_migrations(connection)
+
+        assert result_version == TARGET_VERSION
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(expiry_stock)")}
+        assert "normalized_name" in columns
+        connection.close()
+
+    def test_second_call_is_a_no_op(self, tmp_path: Path) -> None:
+        """Повторный вызов apply_migrations не трогает уже импортированные данные."""
+        connection = sqlite3.connect(tmp_path / "fresh.db")
+        apply_migrations(connection)
+        connection.execute(
+            "INSERT INTO expiry_stock (product_name, normalized_name, quantity) "
+            "VALUES ('Товар', 'товар', 5)"
+        )
+        connection.commit()
+
+        result_version = apply_migrations(connection)
+
+        assert result_version == TARGET_VERSION
+        count = connection.execute("SELECT count(*) FROM expiry_stock").fetchone()[0]
+        assert count == 1
+        connection.close()

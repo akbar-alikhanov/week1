@@ -71,6 +71,33 @@ def command_import(container: ApplicationContainer, arguments: argparse.Namespac
     return 0 if not result.failed else 1
 
 
+def command_import_expiry(container: ApplicationContainer, arguments: argparse.Namespace) -> int:
+    """Импортирует Excel-базу сроков годности и остатков в SQLite.
+
+    Args:
+        container: Контейнер зависимостей.
+        arguments: Разобранные аргументы командной строки.
+
+    Returns:
+        Код возврата процесса.
+    """
+    path = Path(arguments.file).expanduser().resolve()
+    if not path.is_file():
+        print(f"Ошибка: файл не найден — {path}", file=sys.stderr)
+        return 2
+
+    print(f"Импорт базы сроков годности: {path}")
+    result = container.expiry_import_service.import_file(path)
+
+    print(f"\n{result.summary('База сроков годности')}")
+    print(f"Длительность: {result.duration_ms / 1000:.1f} с")
+
+    container.settings_service.update(
+        lambda settings: setattr(settings.expiry_stock, "excel_path", str(path))
+    )
+    return 0 if not result.failed else 1
+
+
 def command_process(container: ApplicationContainer, arguments: argparse.Namespace) -> int:
     """Обрабатывает файл заказа.
 
@@ -90,6 +117,12 @@ def command_process(container: ApplicationContainer, arguments: argparse.Namespa
         excel_path = Path(arguments.certificates).expanduser().resolve()
         print(f"Импорт базы сертификатов: {excel_path}")
         container.certificate_import_service.import_file(excel_path)
+        print()
+
+    if arguments.expiry_stock:
+        expiry_path = Path(arguments.expiry_stock).expanduser().resolve()
+        print(f"Импорт базы сроков годности: {expiry_path}")
+        container.expiry_import_service.import_file(expiry_path)
         print()
 
     print(f"Обработка заказа: {order_path.name}")
@@ -173,12 +206,16 @@ def command_stats(container: ApplicationContainer, _: argparse.Namespace) -> int
     certificates = container.certificate_repository.statistics()
     history = container.history_repository.statistics()
     products = container.product_repository.statistics()
+    expiry_stock = container.expiry_stock_repository.statistics()
 
     print("База сертификатов")
     print(f"  всего:              {certificates['total']}")
     print(f"  просроченных:       {certificates['expired']}")
     print(f"  истекают за 90 дн.: {certificates['expiring_soon']}")
     print(f"  без срока:          {certificates['without_expiry']}")
+    print("\nБаза сроков годности")
+    print(f"  партий:             {expiry_stock['total']}")
+    print(f"  уникальных товаров: {expiry_stock['unique_products']}")
     print(f"\nПсевдонимы: {container.alias_repository.count()}")
     print(f"Товары: {products['total']} (успешность подбора {products['match_rate'] * 100:.1f} %)")
     print("\nОбработка за 30 дней")
@@ -269,10 +306,20 @@ def build_parser() -> argparse.ArgumentParser:
     import_parser = subparsers.add_parser("import", help="импортировать Excel-базу сертификатов")
     import_parser.add_argument("file", help="путь к Excel-файлу базы сертификатов")
 
+    import_expiry_parser = subparsers.add_parser(
+        "import-expiry", help="импортировать Excel-базу сроков годности и остатков"
+    )
+    import_expiry_parser.add_argument("file", help="путь к Excel-файлу базы сроков годности")
+
     process_parser = subparsers.add_parser("process", help="обработать файл заказа")
     process_parser.add_argument("order", help="путь к файлу заказа (.xlsx)")
     process_parser.add_argument(
         "--certificates", "-c", help="файл базы сертификатов (Excel) для импорта перед обработкой"
+    )
+    process_parser.add_argument(
+        "--expiry-stock",
+        "-e",
+        help="файл базы сроков годности и остатков (Excel) для импорта перед обработкой",
     )
     process_parser.add_argument("--output", "-o", help="каталог результата")
     process_parser.add_argument("--sheet", help="имя листа книги")
@@ -315,6 +362,7 @@ def run(argv: list[str] | None = None) -> int:
 
     commands = {
         "import": command_import,
+        "import-expiry": command_import_expiry,
         "process": command_process,
         "search": command_search,
         "stats": command_stats,

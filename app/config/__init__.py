@@ -3,6 +3,7 @@
 from app.config.settings import (
     AppSettings,
     CertificatesSettings,
+    ExpiryStockSettings,
     ExportSettings,
     MaintenanceSettings,
     MatchingSettings,
@@ -13,6 +14,7 @@ from app.config.settings import (
 __all__ = [
     "AppSettings",
     "CertificatesSettings",
+    "ExpiryStockSettings",
     "ExportSettings",
     "MaintenanceSettings",
     "MatchingSettings",

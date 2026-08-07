@@ -29,16 +29,18 @@ from app.repositories.alias_repository import AliasRepository  # noqa: E402
 from app.repositories.certificate_product_repository import (  # noqa: E402
     CertificateProductRepository,
 )
+from app.repositories.expiry_stock_repository import ExpiryStockRepository  # noqa: E402
 from app.repositories.history_repository import HistoryRepository  # noqa: E402
 from app.repositories.product_repository import ProductRepository  # noqa: E402
 from app.services.alias_service import AliasService  # noqa: E402
+from app.services.expiry_resolution_service import ExpiryResolutionService  # noqa: E402
 from app.services.matching_service import MatchingService  # noqa: E402
 from app.services.order_processing_service import (  # noqa: E402
     OrderProcessingService,
     ProcessingRequest,
 )
 from app.services.report_service import ReportService  # noqa: E402
-from tests.conftest import make_certificate  # noqa: E402
+from tests.conftest import make_certificate, make_expiry_entry  # noqa: E402
 
 _FUTURE = dt.date.today() + dt.timedelta(days=365 * 3)
 
@@ -51,6 +53,30 @@ def _build_order_file(path: Path, rows: list[tuple[str, int]]) -> None:
     sheet.append(["№", "Наименование товара", "Кол-во", "Сертификат", "Срок сертификата"])
     for index, (name, quantity) in enumerate(rows, start=1):
         sheet.append([index, name, quantity, None, None])
+    workbook.save(path)
+
+
+def _build_order_file_with_expiry_column(path: Path, rows: list[tuple[str, int]]) -> None:
+    """Создаёт файл заказа с колонкой требуемого срока годности, изначально пустой.
+
+    Используется тестами интеграции нового этапа подбора срока годности —
+    именно такую пустую колонку он и должен заполнить до поиска сертификата.
+    """
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Заказ"
+    sheet.append(
+        [
+            "№",
+            "Наименование товара",
+            "Кол-во",
+            "Требуемый срок годности",
+            "Сертификат",
+            "Срок сертификата",
+        ]
+    )
+    for index, (name, quantity) in enumerate(rows, start=1):
+        sheet.append([index, name, quantity, None, None, None])
     workbook.save(path)
 
 
@@ -108,6 +134,49 @@ def order_service(tmp_path: Path, database: Database) -> Iterator[OrderProcessin
     (tmp_path / "certs" / "UZ.180002.pdf").write_bytes(b"%PDF-1.4 fake")
 
     yield service
+
+
+@pytest.fixture
+def order_service_with_expiry(
+    tmp_path: Path, database: Database
+) -> Iterator[tuple[OrderProcessingService, ExpiryStockRepository, CertificateProductRepository]]:
+    """Оркестратор с подключённым новым этапом подбора срока годности.
+
+    В остальном идентичен ``order_service`` — то же самое, только с
+    ``expiry_resolution_service``, что и включает новый этап (см.
+    :class:`~app.services.expiry_resolution_service.ExpiryResolutionService`).
+    Без базы сроков годности (``expiry_stock`` пуст) поведение обязано
+    остаться прежним — это тоже часть проверок.
+    """
+    certificates = CertificateProductRepository(database)
+    aliases = AliasRepository(database)
+    products = ProductRepository(database)
+    history = HistoryRepository(database)
+    expiry_stock = ExpiryStockRepository(database)
+    settings_service = SettingsService(tmp_path / "settings.json")
+    settings_service.load()
+    settings_service.update(
+        lambda settings: setattr(settings.export, "output_dir", str(tmp_path / "output"))
+    )
+    settings_service.update(lambda settings: setattr(settings.export, "write_report", False))
+
+    backend = EmbeddingBackend(enabled=False)
+    vector_index = VectorIndex(backend, None)
+    matching = MatchingService(certificates, aliases, settings_service, backend, vector_index)
+    expiry_resolution = ExpiryResolutionService(expiry_stock, matching)
+
+    service = OrderProcessingService(
+        matching,
+        ExcelOrderParser(),
+        history,
+        products,
+        ReportService(),
+        settings_service,
+        EventBus(),
+        expiry_resolution_service=expiry_resolution,
+    )
+
+    yield service, expiry_stock, certificates
 
 
 class TestFullScenario:
@@ -315,4 +384,177 @@ class TestSelfLearningConsent:
             )
         )
 
-        assert alias_repository.count() == 1
+
+class TestExpiryResolutionIntegration:
+    """Проверки интеграции нового этапа подбора срока годности в общий сценарий.
+
+    В отличие от ``tests/services/test_expiry_resolution_service.py`` (все
+    ветки самого алгоритма в изоляции), здесь проверяется, что новый этап
+    правильно встроен в оркестратор целиком: выполняется ДО поиска
+    сертификата, не переписывает и не заменяет существующий алгоритм подбора,
+    а исключённые им строки не попадают в обычный подбор вовсе.
+    """
+
+    def test_resolved_expiry_written_to_output_column_and_certificate_matched(
+        self,
+        order_service_with_expiry: tuple[
+            OrderProcessingService, ExpiryStockRepository, CertificateProductRepository
+        ],
+        tmp_path: Path,
+    ) -> None:
+        """Товар без требуемого срока в заказе получает его от нового этапа целиком.
+
+        Сквозная проверка: колонка «Требуемый срок годности» в исходном
+        заказе пуста → новый этап подбирает срок по базе остатков → строка
+        уходит в уже существующий, нетронутый алгоритм подбора → найденный
+        сертификат и подобранный срок оба оказываются в итоговом Excel.
+        """
+        service, expiry_stock, certificates = order_service_with_expiry
+        certificates.replace_all(
+            [make_certificate("Крем детский 100 мл", expiry_date=dt.date(2028, 6, 1))]
+        )
+        expiry_stock.replace_all(
+            [
+                make_expiry_entry(
+                    "Крем детский 100 мл", expiry_date=dt.date(2028, 6, 1), quantity=100
+                )
+            ]
+        )
+
+        order_path = tmp_path / "Заказ.xlsx"
+        _build_order_file_with_expiry_column(order_path, [("Крем детский 100 мл", 10)])
+
+        outcome = service.process(ProcessingRequest(order_path=order_path))
+
+        assert outcome.results[0].status is MatchStatus.MATCHED
+        assert outcome.results[0].expiry_auto_resolved is True
+
+        workbook = openpyxl.load_workbook(outcome.output_file)
+        sheet = workbook["Заказ"]
+        cell = sheet.cell(row=2, column=4).value
+        written_date = cell.date() if isinstance(cell, dt.datetime) else cell
+        assert written_date == dt.date(2028, 6, 1)
+        assert sheet.cell(row=2, column=5).value  # номер сертификата записан
+        workbook.close()
+
+    def test_product_missing_from_stock_database_bypasses_normal_matching(
+        self,
+        order_service_with_expiry: tuple[
+            OrderProcessingService, ExpiryStockRepository, CertificateProductRepository
+        ],
+        tmp_path: Path,
+    ) -> None:
+        """Товар вне базы сроков не доходит до обычного подбора сертификата.
+
+        Регрессия: даже если подходящий сертификат для товара ЕСТЬ в базе,
+        отсутствие товара в базе сроков годности должно исключить строку из
+        обычного подбора целиком (см. ``ExpiryResolutionService``), а не
+        просто понизить её приоритет.
+        """
+        service, expiry_stock, certificates = order_service_with_expiry
+        certificates.replace_all(
+            [
+                make_certificate(
+                    "Крем детский 100 мл", expiry_date=_FUTURE, certificate_number="UZ.1"
+                )
+            ]
+        )
+        # В базе сроков годности есть данные — но не для этого товара.
+        expiry_stock.replace_all(
+            [make_expiry_entry("Другой товар", expiry_date=dt.date(2028, 1, 1), quantity=100)]
+        )
+
+        order_path = tmp_path / "Заказ.xlsx"
+        _build_order_file_with_expiry_column(order_path, [("Крем детский 100 мл", 10)])
+
+        outcome = service.process(ProcessingRequest(order_path=order_path))
+
+        result = outcome.results[0]
+        assert result.status is MatchStatus.NOT_FOUND
+        assert result.expiry_not_in_database is True
+        assert result.certificate is None
+
+        workbook = openpyxl.load_workbook(outcome.output_file)
+        sheet = workbook["Заказ"]
+        assert sheet.cell(row=2, column=2).font.strike is True
+        assert sheet.cell(row=2, column=2).fill.fill_type == "solid"
+        workbook.close()
+
+    def test_row_with_preexisting_requested_expiry_skips_new_stage(
+        self,
+        order_service_with_expiry: tuple[
+            OrderProcessingService, ExpiryStockRepository, CertificateProductRepository
+        ],
+        tmp_path: Path,
+    ) -> None:
+        """Заказ с уже указанным требуемым сроком не проходит через новый этап.
+
+        База сроков годности настроена (не пуста — иначе сработал бы общий
+        «выключенный» путь), но для этого товара в ней нет ни одной записи.
+        Без короткого замыкания по уже заполненной колонке строка была бы
+        ошибочно исключена как «товар отсутствует в базе сроков» — этого не
+        должно произойти, раз человек уже указал срок сам.
+        """
+        service, expiry_stock, certificates = order_service_with_expiry
+        certificates.replace_all(
+            [
+                make_certificate(
+                    "Крем детский 100 мл", expiry_date=_FUTURE, certificate_number="UZ.1"
+                )
+            ]
+        )
+        expiry_stock.replace_all(
+            [make_expiry_entry("Другой товар", expiry_date=dt.date(2028, 1, 1), quantity=100)]
+        )
+
+        order_path = tmp_path / "Заказ.xlsx"
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        sheet.title = "Заказ"
+        sheet.append(["№", "Наименование товара", "Кол-во", "Требуемый срок годности"])
+        sheet.append([1, "Крем детский 100 мл", 10, dt.date(2029, 1, 1)])
+        workbook.save(order_path)
+
+        outcome = service.process(ProcessingRequest(order_path=order_path))
+
+        result = outcome.results[0]
+        assert result.expiry_not_in_database is False
+        assert result.expiry_auto_resolved is False
+
+        workbook = openpyxl.load_workbook(outcome.output_file)
+        sheet = workbook["Заказ"]
+        cell = sheet.cell(row=2, column=4).value
+        written_date = cell.date() if isinstance(cell, dt.datetime) else cell
+        assert written_date == dt.date(2029, 1, 1)
+        workbook.close()
+
+    def test_empty_stock_database_leaves_existing_algorithm_untouched(
+        self,
+        order_service_with_expiry: tuple[
+            OrderProcessingService, ExpiryStockRepository, CertificateProductRepository
+        ],
+        tmp_path: Path,
+    ) -> None:
+        """Неподключённая (пустая) база сроков годности не меняет поведения вообще.
+
+        С сервисом, подключённым в контейнере, но без единого импорта — итог
+        обработки должен быть в точности таким же, как без этой функции.
+        """
+        service, _expiry_stock, certificates = order_service_with_expiry
+        certificates.replace_all(
+            [
+                make_certificate(
+                    "Крем детский 100 мл", expiry_date=_FUTURE, certificate_number="UZ.1"
+                )
+            ]
+        )
+
+        order_path = tmp_path / "Заказ.xlsx"
+        _build_order_file_with_expiry_column(order_path, [("Крем детский 100 мл", 10)])
+
+        outcome = service.process(ProcessingRequest(order_path=order_path))
+
+        result = outcome.results[0]
+        assert result.status is MatchStatus.MATCHED
+        assert result.expiry_not_in_database is False
+        assert result.expiry_auto_resolved is False

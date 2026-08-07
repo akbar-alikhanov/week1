@@ -16,6 +16,17 @@
 пересекается с ролью требуемого срока ни по смыслу, ни по ключевым словам
 заголовка.
 
+Единственное исключение из «колонка требуемого срока никогда не изменяется» —
+строки, где этой колонки в заказе изначально не было заполнено вообще: для
+них новый этап подбора (:class:`~app.services.expiry_resolution_service.ExpiryResolutionService`)
+сам определяет подходящий срок ДО поиска сертификата, и требование продукта
+явно предписывает записать подобранный срок в эту же колонку заказа. Такая
+запись выполняется, только если строка помечена
+:attr:`~app.models.matching.MatchResult.expiry_auto_resolved` — то есть срок
+был подобран, а не взят из заказа, — и только в уже существующую колонку;
+если такой колонки в заказе нет вообще, она не создаётся, а колонка
+пропускается.
+
 Копия делается средствами openpyxl с сохранением форматирования, формул,
 объединённых ячеек и ширины колонок: пользователь получает свой привычный
 документ, в котором просто добавлены (или обновлены, если уже существуют)
@@ -34,7 +45,7 @@ from app.core.constants import STATUS_AMBIGUOUS, STATUS_MATCHED, STATUS_NOT_FOUN
 from app.core.exceptions import ExportError
 from app.models.matching import MatchResult, MatchStatus
 from app.models.order import OrderDocument
-from app.parsers.column_mapper import ROLE_CERTIFICATE, ROLE_CERTIFICATE_EXPIRY
+from app.parsers.column_mapper import ROLE_CERTIFICATE, ROLE_CERTIFICATE_EXPIRY, ROLE_EXPIRY
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -42,12 +53,15 @@ _LOGGER = logging.getLogger(__name__)
 class ExcelWriterService:
     """Записывает результаты подбора в копию файла заказа.
 
-    Пишет ровно в две колонки — номер найденного сертификата и его срок
+    Пишет ровно в две свои колонки — номер найденного сертификата и его срок
     годности (роли :data:`~app.parsers.column_mapper.ROLE_CERTIFICATE` и
-    :data:`~app.parsers.column_mapper.ROLE_CERTIFICATE_EXPIRY`). Ни одна
-    другая колонка заказа, включая требуемый срок годности
-    (:data:`~app.parsers.column_mapper.ROLE_EXPIRY`), никогда не изменяется
-    и не создаётся этим сервисом — см. докстринг модуля.
+    :data:`~app.parsers.column_mapper.ROLE_CERTIFICATE_EXPIRY`) — и никогда не
+    создаёт новых колонок сверх этого. Колонка требуемого срока годности
+    (:data:`~app.parsers.column_mapper.ROLE_EXPIRY`) не создаётся и не
+    перезаписывается, если в ней уже было значение; единственное исключение —
+    строки с :attr:`~app.models.matching.MatchResult.expiry_auto_resolved`
+    (колонка была пуста, срок подобран новым этапом до поиска сертификата) —
+    см. докстринг модуля.
     """
 
     def __init__(self, settings: ExportSettings) -> None:
@@ -130,12 +144,22 @@ class ExcelWriterService:
                 if self._settings.add_score_column
                 else None
             )
+            # Только чтение позиции существующей колонки — в отличие от
+            # certificate_column/expiry_column, колонка требуемого срока
+            # никогда не создаётся заново: у неё особый смысл (согласована с
+            # поставщиком в самом заказе), и её отсутствие не повод её
+            # придумывать.
+            requested_expiry_index = document.column_map.get(ROLE_EXPIRY)
+            requested_expiry_column = (
+                requested_expiry_index + 1 if requested_expiry_index is not None else None
+            )
 
             fills = {
                 STATUS_MATCHED: PatternFill("solid", fgColor=self._settings.color_matched),
                 STATUS_AMBIGUOUS: PatternFill("solid", fgColor=self._settings.color_ambiguous),
                 STATUS_NOT_FOUND: PatternFill("solid", fgColor=self._settings.color_not_found),
             }
+            expiry_missing_fill = PatternFill("solid", fgColor=self._settings.color_expiry_missing)
             alignment = Alignment(horizontal="center", vertical="center")
 
             written = 0
@@ -157,7 +181,37 @@ class ExcelWriterService:
                     score_cell.value = round(result.score * 100) if result.score else ""
                     score_cell.alignment = alignment
 
-                if self._settings.highlight_rows:
+                # Единственный случай записи в колонку требуемого срока:
+                # в заказе она была пуста, и новый этап сам подобрал срок
+                # (см. докстринг модуля и MatchResult.expiry_auto_resolved).
+                # Если срок уже был в заказе, expiry_auto_resolved не
+                # выставляется — колонка остаётся нетронутой. В отличие от
+                # E/F (текстовые колонки, создаваемые этим сервисом), сюда
+                # пишется настоящая дата, а не отформатированная строка: это
+                # существующая колонка исходного заказа, и для остальных
+                # строк в ней уже лежат обычные даты Excel — значение должно
+                # остаться сортируемой/фильтруемой датой, а не текстом.
+                if (
+                    result.expiry_auto_resolved
+                    and requested_expiry_column is not None
+                    and result.row.requested_expiry is not None
+                ):
+                    requested_expiry_cell = sheet.cell(
+                        row=row_index, column=requested_expiry_column
+                    )
+                    requested_expiry_cell.value = result.row.requested_expiry
+                    requested_expiry_cell.number_format = "DD.MM.YYYY"
+                    requested_expiry_cell.alignment = alignment
+
+                # Товар вне базы сроков годности — этап подбора сертификата
+                # для строки вообще не выполнялся (см. ExpiryResolutionService),
+                # поэтому строка выделяется безусловно, независимо от
+                # highlight_rows: это не декоративная подсветка статуса, а
+                # сигнал «сюда программа даже не заглядывала».
+                if result.expiry_not_in_database:
+                    self._highlight_row(sheet, row_index, expiry_missing_fill, document)
+                    self._strike_row(sheet, row_index, Font, document)
+                elif self._settings.highlight_rows:
                     fill = fills.get(_status_key(result.status))
                     if fill is not None:
                         self._highlight_row(sheet, row_index, fill, document)
@@ -215,6 +269,14 @@ class ExcelWriterService:
         last_column = max(sheet.max_column, len(document.headers))
         for column in range(1, last_column + 1):
             sheet.cell(row=row_index, column=column).fill = fill
+
+    def _strike_row(
+        self, sheet: Any, row_index: int, font_class: Any, document: OrderDocument
+    ) -> None:
+        """Зачёркивает текст всей строки (товар отсутствует в базе сроков годности)."""
+        last_column = max(sheet.max_column, len(document.headers))
+        for column in range(1, last_column + 1):
+            sheet.cell(row=row_index, column=column).font = font_class(strike=True)
 
     def _style_header(
         self,

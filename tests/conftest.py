@@ -15,9 +15,11 @@ import pytest
 
 from app.database.connection import Database
 from app.models.certificate_product import CertificateProduct
+from app.models.expiry_stock import ExpiryStockEntry
 from app.repositories.alias_repository import AliasRepository
 from app.repositories.cache_repository import CacheRepository
 from app.repositories.certificate_product_repository import CertificateProductRepository
+from app.repositories.expiry_stock_repository import ExpiryStockRepository
 from app.repositories.history_repository import HistoryRepository
 from app.repositories.product_repository import ProductRepository
 from app.repositories.settings_repository import SettingsRepository
@@ -68,6 +70,12 @@ def settings_repository(database: Database) -> SettingsRepository:
     return SettingsRepository(database)
 
 
+@pytest.fixture
+def expiry_stock_repository(database: Database) -> ExpiryStockRepository:
+    """Репозиторий базы сроков годности поверх временной базы."""
+    return ExpiryStockRepository(database)
+
+
 def make_certificate(
     product_name: str,
     *,
@@ -93,5 +101,31 @@ def make_certificate(
         volume_ml=volume_ml,
         expiry_date=expiry_date,
         certificate_number=certificate_number,
+        source_row=source_row,
+    )
+
+
+def make_expiry_entry(
+    product_name: str,
+    *,
+    expiry_date: dt.date | None = None,
+    quantity: float = 0.0,
+    source_row: int = 0,
+) -> ExpiryStockEntry:
+    """Создаёт партию базы сроков годности для использования в тестах.
+
+    Args:
+        product_name: Полное системное название товара.
+        expiry_date: Срок годности партии.
+        quantity: Остаток партии на складе.
+        source_row: Порядковый номер строки в исходном Excel-файле.
+
+    Returns:
+        Заполненный объект :class:`ExpiryStockEntry`.
+    """
+    return ExpiryStockEntry(
+        product_name=product_name,
+        expiry_date=expiry_date,
+        quantity=quantity,
         source_row=source_row,
     )

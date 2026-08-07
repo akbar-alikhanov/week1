@@ -95,6 +95,37 @@ def _document_with_requested_expiry(path: Path) -> OrderDocument:
     return document
 
 
+def _build_order_file_with_empty_requested_expiry(path: Path) -> None:
+    """Создаёт файл заказа с колонкой требуемого срока годности, но без значений.
+
+    Воспроизводит случай, под который сделан новый этап подбора срока
+    годности: колонка в заказе есть, но заполнить её было нечем — это и
+    предстоит сделать ``ExpiryResolutionService`` до поиска сертификата.
+    """
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Заказ"
+    sheet.append(["№", "Наименование товара", "Кол-во", "Требуемый срок годности"])
+    sheet.append([1, "Лечебные травы 100 мл", 10, None])
+    sheet.append([2, "Товар без сертификата", 5, None])
+    workbook.save(path)
+
+
+def _document_with_empty_requested_expiry(path: Path) -> OrderDocument:
+    """Строит объект заказа, соответствующий _build_order_file_with_empty_requested_expiry."""
+    document = OrderDocument(
+        path=path,
+        sheet_name="Заказ",
+        header_row=1,
+        column_map={ROLE_PRODUCT: 1, ROLE_QUANTITY: 2, ROLE_EXPIRY: 3},
+    )
+    document.rows = [
+        OrderRow(row_number=2, product_name="Лечебные травы 100 мл", quantity=10),
+        OrderRow(row_number=3, product_name="Товар без сертификата", quantity=5),
+    ]
+    return document
+
+
 def _cell_date(sheet: Any, row: int, column: int) -> dt.date | None:
     """Приводит значение ячейки к ``date`` (openpyxl округляет date до datetime)."""
     value = sheet.cell(row=row, column=column).value
@@ -122,6 +153,30 @@ def _matched_result(row: OrderRow) -> MatchResult:
 def _not_found_result(row: OrderRow) -> MatchResult:
     """Создаёт результат без найденного сертификата."""
     return MatchResult(row=row, status=MatchStatus.NOT_FOUND)
+
+
+def _not_in_database_result(row: OrderRow) -> MatchResult:
+    """Создаёт результат «товар отсутствует в базе сроков годности» (Шаг 1а)."""
+    return MatchResult(
+        row=row,
+        status=MatchStatus.NOT_FOUND,
+        note="Товар отсутствует в базе сроков.",
+        expiry_not_in_database=True,
+    )
+
+
+def _auto_resolved_result(row: OrderRow, *, resolved_expiry: dt.date) -> MatchResult:
+    """Создаёт результат с сертификатом, найденным на автоматически подобранный срок.
+
+    Имитирует то, что делает ``OrderProcessingService`` после успешной работы
+    ``ExpiryResolutionService``: срок дописывается в саму строку заказа, а
+    результат помечается ``expiry_auto_resolved`` — именно этот признак
+    разрешает writer'у записать срок в колонку требуемого срока годности.
+    """
+    row.requested_expiry = resolved_expiry
+    result = _matched_result(row)
+    result.expiry_auto_resolved = True
+    return result
 
 
 class TestBuildOutputPath:
@@ -349,3 +404,201 @@ class TestRequestedExpiryNeverOverwritten:
         assert result_sheet.cell(row=2, column=5).value == "UZ.183255"
         assert result_sheet.cell(row=2, column=6).value == "22.03.2029"
         result_workbook.close()
+
+
+class TestAutoResolvedExpiryWrittenToRequestedColumn:
+    """Новый этап подбора срока годности (Шаг 1а) дописывает пустую колонку D.
+
+    Единственное разрешённое исключение из «требуемый срок никогда не
+    меняется» (см. ``TestRequestedExpiryNeverOverwritten`` выше): колонка
+    была пуста, и подходящий срок для неё подобрал
+    ``ExpiryResolutionService`` ДО поиска сертификата — по явному требованию
+    продукта результат должен попасть в ту же колонку заказа.
+    """
+
+    def test_fills_empty_requested_expiry_cell(self, tmp_path: Path) -> None:
+        """Пустая ячейка колонки требуемого срока заполняется подобранной датой."""
+        order_path = tmp_path / "order.xlsx"
+        _build_order_file_with_empty_requested_expiry(order_path)
+        document = _document_with_empty_requested_expiry(order_path)
+        resolved_row, untouched_row = document.rows
+        results = [
+            _auto_resolved_result(resolved_row, resolved_expiry=dt.date(2027, 9, 1)),
+            _not_found_result(untouched_row),
+        ]
+
+        writer = ExcelWriterService(ExportSettings())
+        destination = writer.build_output_path(order_path)
+        writer.write(document, results, destination)
+
+        workbook = openpyxl.load_workbook(destination)
+        sheet = workbook["Заказ"]
+        assert _cell_date(sheet, 2, 4) == dt.date(2027, 9, 1)
+        # Строка, для которой новый этап ничего не подобрал (обычное
+        # «не найдено», без expiry_auto_resolved), остаётся пустой — как и
+        # было в исходном заказе.
+        assert _cell_date(sheet, 3, 4) is None
+        workbook.close()
+
+    def test_written_date_is_requested_expiry_not_certificate_expiry(self, tmp_path: Path) -> None:
+        """В колонку D попадает подобранный требуемый срок, а не срок сертификата.
+
+        ``_matched_result`` создаёт сертификат со сроком 22.03.2029 — если бы
+        writer перепутал колонки, в D оказалась бы именно эта дата, а не
+        23.08.2027, которую ``ExpiryResolutionService`` записал в саму
+        строку заказа.
+        """
+        order_path = tmp_path / "order.xlsx"
+        _build_order_file_with_empty_requested_expiry(order_path)
+        document = _document_with_empty_requested_expiry(order_path)
+        row = document.rows[0]
+        result = _auto_resolved_result(row, resolved_expiry=dt.date(2027, 8, 23))
+
+        writer = ExcelWriterService(ExportSettings())
+        destination = writer.build_output_path(order_path)
+        writer.write(document, [result, _not_found_result(document.rows[1])], destination)
+
+        workbook = openpyxl.load_workbook(destination)
+        sheet = workbook["Заказ"]
+        assert _cell_date(sheet, 2, 4) == dt.date(2027, 8, 23)
+        assert sheet.cell(row=2, column=6).value == "22.03.2029"
+        workbook.close()
+
+    def test_missing_column_is_not_created(self, tmp_path: Path) -> None:
+        """Без колонки требуемого срока в исходном заказе writer её не придумывает."""
+        order_path = tmp_path / "order.xlsx"
+        _build_order_file(order_path)
+        document = _document(order_path)
+        row = document.rows[0]
+        result = _auto_resolved_result(row, resolved_expiry=dt.date(2027, 1, 1))
+
+        writer = ExcelWriterService(ExportSettings())
+        destination = writer.build_output_path(order_path)
+        writer.write(document, [result, _not_found_result(document.rows[1])], destination)
+
+        workbook = openpyxl.load_workbook(destination)
+        sheet = workbook["Заказ"]
+        # Только колонки сертификата (3) и его срока (4) добавлены сверх
+        # исходных двух («№», «Наименование товара») — никакой третьей новой
+        # колонки под требуемый срок годности не появилось.
+        assert sheet.max_column == 4
+        workbook.close()
+
+    def test_not_auto_resolved_result_never_writes_column(self, tmp_path: Path) -> None:
+        """Без expiry_auto_resolved даже заполненный row.requested_expiry не пишется.
+
+        Дополнительная защита инварианта «требуемый срок меняется только для
+        строк, помеченных новым этапом» — на случай, если у результата
+        случайно оказался и заполненный ``requested_expiry``, и обычный
+        (не ``expiry_auto_resolved``) статус.
+        """
+        order_path = tmp_path / "order.xlsx"
+        _build_order_file_with_empty_requested_expiry(order_path)
+        document = _document_with_empty_requested_expiry(order_path)
+        row = document.rows[0]
+        row.requested_expiry = dt.date(2027, 1, 1)
+        result = _matched_result(row)
+        assert result.expiry_auto_resolved is False
+
+        writer = ExcelWriterService(ExportSettings())
+        destination = writer.build_output_path(order_path)
+        writer.write(document, [result, _not_found_result(document.rows[1])], destination)
+
+        workbook = openpyxl.load_workbook(destination)
+        sheet = workbook["Заказ"]
+        assert _cell_date(sheet, 2, 4) is None
+        workbook.close()
+
+
+class TestExpiryMissingFormatting:
+    """Жёлтая заливка и зачёркнутый текст для «товар отсутствует в базе сроков»."""
+
+    def test_row_gets_yellow_fill_and_strikethrough(self, tmp_path: Path) -> None:
+        """Строка с expiry_not_in_database получает цвет color_expiry_missing и зачёркивание."""
+        order_path = tmp_path / "order.xlsx"
+        _build_order_file(order_path)
+        document = _document(order_path)
+        settings = ExportSettings(color_expiry_missing="FFEB3B")
+        results = [_not_in_database_result(document.rows[0]), _not_found_result(document.rows[1])]
+
+        writer = ExcelWriterService(settings)
+        destination = writer.build_output_path(order_path)
+        writer.write(document, results, destination)
+
+        workbook = openpyxl.load_workbook(destination)
+        sheet = workbook["Заказ"]
+        fill = sheet.cell(row=2, column=2).fill
+        assert fill.fill_type == "solid"
+        assert fill.fgColor.rgb.endswith("FFEB3B")
+        assert sheet.cell(row=2, column=2).font.strike is True
+        workbook.close()
+
+    def test_formatting_applies_even_when_highlight_rows_disabled(self, tmp_path: Path) -> None:
+        """Признак «нет в базе сроков» — не декоративная подсветка, а безусловный сигнал.
+
+        В отличие от обычной подсветки по статусу (``highlight_rows``), это
+        форматирование включается независимо от настройки: этап подбора
+        сертификата для такой строки вообще не выполнялся, и это должно быть
+        видно всегда.
+        """
+        order_path = tmp_path / "order.xlsx"
+        _build_order_file(order_path)
+        document = _document(order_path)
+        settings = ExportSettings(highlight_rows=False, color_expiry_missing="FFEB3B")
+        results = [_not_in_database_result(document.rows[0])]
+
+        writer = ExcelWriterService(settings)
+        destination = writer.build_output_path(order_path)
+        writer.write(document, results, destination)
+
+        workbook = openpyxl.load_workbook(destination)
+        sheet = workbook["Заказ"]
+        fill = sheet.cell(row=2, column=2).fill
+        assert fill.fill_type == "solid"
+        assert sheet.cell(row=2, column=2).font.strike is True
+        workbook.close()
+
+    def test_ordinary_not_found_row_is_not_struck_through(self, tmp_path: Path) -> None:
+        """Обычное «не найдено» (товар в базе сроков есть) не зачёркивается."""
+        order_path = tmp_path / "order.xlsx"
+        _build_order_file(order_path)
+        document = _document(order_path)
+        results = [_not_found_result(document.rows[0])]
+
+        writer = ExcelWriterService(ExportSettings())
+        destination = writer.build_output_path(order_path)
+        writer.write(document, results, destination)
+
+        workbook = openpyxl.load_workbook(destination)
+        sheet = workbook["Заказ"]
+        font = sheet.cell(row=2, column=2).font
+        assert not font.strike
+        workbook.close()
+
+    def test_ordinary_not_found_fill_differs_from_expiry_missing_fill(self, tmp_path: Path) -> None:
+        """Обычная заливка «не найдено» и заливка «нет в базе сроков» — разные цвета."""
+        order_path = tmp_path / "order.xlsx"
+        _build_order_file(order_path)
+        document = _document(order_path)
+        settings = ExportSettings(color_not_found="FBD5D5", color_expiry_missing="FFEB3B")
+
+        writer = ExcelWriterService(settings)
+
+        ordinary_destination = writer.build_output_path(order_path)
+        writer.write(document, [_not_found_result(document.rows[0])], ordinary_destination)
+        ordinary_workbook = openpyxl.load_workbook(ordinary_destination)
+        ordinary_fill = ordinary_workbook["Заказ"].cell(row=2, column=2).fill.fgColor.rgb
+        ordinary_workbook.close()
+
+        missing_document = _document(order_path)
+        missing_destination = writer.build_output_path(order_path)
+        writer.write(
+            missing_document,
+            [_not_in_database_result(missing_document.rows[0])],
+            missing_destination,
+        )
+        missing_workbook = openpyxl.load_workbook(missing_destination)
+        missing_fill = missing_workbook["Заказ"].cell(row=2, column=2).fill.fgColor.rgb
+        missing_workbook.close()
+
+        assert ordinary_fill != missing_fill

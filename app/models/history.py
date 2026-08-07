@@ -225,14 +225,24 @@ class ImportResult:
         """Признак того, что импорт завершился ошибкой."""
         return bool(self.error)
 
-    def summary(self) -> str:
-        """Возвращает однострочную сводку для уведомления и журнала."""
+    def summary(self, subject: str = "База сертификатов") -> str:
+        """Возвращает однострочную сводку для уведомления и журнала.
+
+        Args:
+            subject: Название импортируемой базы в начале сообщения — этот
+                же класс результата используют и импорт базы сертификатов,
+                и импорт базы сроков годности
+                (:class:`~app.services.expiry_import_service.ExpiryImportService`).
+
+        Returns:
+            Готовая строка для тоста/журнала.
+        """
         if self.error:
-            return f"Импорт базы сертификатов не выполнен: {self.error}"
+            return f"Импорт «{subject}» не выполнен: {self.error}"
         parts = [f"импортировано {self.imported}"]
         if self.skipped_rows:
             parts.append(f"пропущено строк {self.skipped_rows}")
-        return "База сертификатов обновлена: " + ", ".join(parts)
+        return f"{subject} обновлена: " + ", ".join(parts)
 
 
 def _parse(value: Any) -> datetime:

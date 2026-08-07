@@ -158,6 +158,31 @@ class CertificatesSettings:
 
 
 @dataclass(slots=True)
+class ExpiryStockSettings:
+    """Параметры источника данных о сроках годности и остатках.
+
+    Отдельная от базы сертификатов Excel-таблица: используется новым этапом
+    подбора срока годности, который выполняется ДО поиска сертификата (см.
+    :class:`~app.services.expiry_resolution_service.ExpiryResolutionService`).
+    Как и с базой сертификатов, Excel — единственный источник данных, а
+    SQLite — только его индекс.
+
+    Attributes:
+        excel_path: Путь к Excel-файлу базы сроков годности (пусто — этап
+            подбора срока годности не активен, поведение не отличается от
+            того, что было до появления этой функции).
+        rescan_on_start: Проверять ли изменение Excel-файла при запуске
+            приложения и переимпортировать его при необходимости.
+    """
+
+    excel_path: str = ""
+    rescan_on_start: bool = True
+
+    def validate(self) -> None:
+        """Приводит значения к допустимым диапазонам (нет числовых полей)."""
+
+
+@dataclass(slots=True)
 class ExportSettings:
     """Параметры формирования результата.
 
@@ -169,6 +194,11 @@ class ExportSettings:
         color_matched: Цвет подсветки найденных строк (RRGGBB).
         color_ambiguous: Цвет подсветки неоднозначных строк.
         color_not_found: Цвет подсветки ненайденных строк.
+        color_expiry_missing: Цвет подсветки строк, для которых товар не
+            найден в базе сроков годности (см. ``ExpiryResolutionService``).
+            Такие строки дополнительно получают зачёркнутый текст — это
+            не обычное «не найдено», а отдельный признак того, что подбор
+            сертификата для строки вообще не выполнялся.
         write_report: Формировать ли отчёт о совпадениях.
         report_format: Формат отчёта (``xlsx`` или ``csv``).
         open_output_after_run: Открывать ли папку результата по завершении.
@@ -189,6 +219,7 @@ class ExportSettings:
     color_matched: str = "D6F5DD"
     color_ambiguous: str = "FFF3CD"
     color_not_found: str = "FBD5D5"
+    color_expiry_missing: str = "FFEB3B"
     write_report: bool = True
     report_format: str = "xlsx"
     open_output_after_run: bool = True
@@ -281,6 +312,7 @@ class AppSettings:
     Attributes:
         matching: Параметры алгоритма подбора.
         certificates: Параметры источника данных о сертификатах.
+        expiry_stock: Параметры источника данных о сроках годности и остатках.
         export: Параметры выгрузки результата.
         ui: Параметры интерфейса.
         maintenance: Параметры обслуживания.
@@ -288,6 +320,7 @@ class AppSettings:
 
     matching: MatchingSettings = field(default_factory=MatchingSettings)
     certificates: CertificatesSettings = field(default_factory=CertificatesSettings)
+    expiry_stock: ExpiryStockSettings = field(default_factory=ExpiryStockSettings)
     export: ExportSettings = field(default_factory=ExportSettings)
     ui: UiSettings = field(default_factory=UiSettings)
     maintenance: MaintenanceSettings = field(default_factory=MaintenanceSettings)
@@ -296,6 +329,7 @@ class AppSettings:
         """Проверяет и нормализует все группы настроек."""
         self.matching.validate()
         self.certificates.validate()
+        self.expiry_stock.validate()
         self.export.validate()
         self.ui.validate()
         self.maintenance.validate()
@@ -491,9 +525,11 @@ class SettingsService:
         with self._lock:
             preserved_excel = self._settings.certificates.excel_path
             preserved_pdf_dir = self._settings.certificates.pdf_dir
+            preserved_expiry_excel = self._settings.expiry_stock.excel_path
             self._settings = AppSettings()
             self._settings.certificates.excel_path = preserved_excel
             self._settings.certificates.pdf_dir = preserved_pdf_dir
+            self._settings.expiry_stock.excel_path = preserved_expiry_excel
         self.save()
         return self._settings
 

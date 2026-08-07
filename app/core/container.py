@@ -28,12 +28,15 @@ from app.parsers.pdf_parser import PdfParser
 from app.repositories.alias_repository import AliasRepository
 from app.repositories.cache_repository import CacheRepository
 from app.repositories.certificate_product_repository import CertificateProductRepository
+from app.repositories.expiry_stock_repository import ExpiryStockRepository
 from app.repositories.history_repository import HistoryRepository
 from app.repositories.product_repository import ProductRepository
 from app.repositories.settings_repository import SettingsRepository
 from app.services.alias_service import AliasService
 from app.services.backup_service import BackupService
 from app.services.certificate_import_service import CertificateImportService
+from app.services.expiry_import_service import ExpiryImportService
+from app.services.expiry_resolution_service import ExpiryResolutionService
 from app.services.matching_service import MatchingService
 from app.services.order_processing_service import OrderProcessingService
 from app.services.report_service import ReportService
@@ -68,6 +71,9 @@ class ApplicationContainer:
         self._certificate_repository: Lazy[CertificateProductRepository] = Lazy(
             lambda: CertificateProductRepository(self.database)
         )
+        self._expiry_stock_repository: Lazy[ExpiryStockRepository] = Lazy(
+            lambda: ExpiryStockRepository(self.database)
+        )
         self._alias_repository: Lazy[AliasRepository] = Lazy(lambda: AliasRepository(self.database))
         self._product_repository: Lazy[ProductRepository] = Lazy(
             lambda: ProductRepository(self.database)
@@ -87,6 +93,8 @@ class ApplicationContainer:
 
         self._matching_service = Lazy(self._create_matching_service)
         self._certificate_import_service = Lazy(self._create_certificate_import_service)
+        self._expiry_import_service = Lazy(self._create_expiry_import_service)
+        self._expiry_resolution_service = Lazy(self._create_expiry_resolution_service)
         self._alias_service = Lazy(self._create_alias_service)
         self._order_service = Lazy(self._create_order_service)
         self._backup_service = Lazy(self._create_backup_service)
@@ -156,6 +164,11 @@ class ApplicationContainer:
         return self._certificate_repository.get()
 
     @property
+    def expiry_stock_repository(self) -> ExpiryStockRepository:
+        """Репозиторий базы сроков годности и остатков (индекс над Excel)."""
+        return self._expiry_stock_repository.get()
+
+    @property
     def alias_repository(self) -> AliasRepository:
         """Репозиторий псевдонимов."""
         return self._alias_repository.get()
@@ -199,6 +212,16 @@ class ApplicationContainer:
     def certificate_import_service(self) -> CertificateImportService:
         """Сервис импорта Excel-базы сертификатов."""
         return self._certificate_import_service.get()
+
+    @property
+    def expiry_import_service(self) -> ExpiryImportService:
+        """Сервис импорта Excel-базы сроков годности и остатков."""
+        return self._expiry_import_service.get()
+
+    @property
+    def expiry_resolution_service(self) -> ExpiryResolutionService:
+        """Сервис подбора срока годности — этап до поиска сертификата."""
+        return self._expiry_resolution_service.get()
 
     @property
     def alias_service(self) -> AliasService:
@@ -328,6 +351,16 @@ class ApplicationContainer:
             self.certificate_repository, self.settings_repository, self._events
         )
 
+    def _create_expiry_import_service(self) -> ExpiryImportService:
+        """Создаёт сервис импорта Excel-базы сроков годности и остатков."""
+        return ExpiryImportService(
+            self.expiry_stock_repository, self.settings_repository, self._events
+        )
+
+    def _create_expiry_resolution_service(self) -> ExpiryResolutionService:
+        """Создаёт сервис подбора срока годности (этап до поиска сертификата)."""
+        return ExpiryResolutionService(self.expiry_stock_repository, self.matching_service)
+
     def _create_alias_service(self) -> AliasService:
         """Создаёт сервис псевдонимов."""
         return AliasService(
@@ -349,6 +382,7 @@ class ApplicationContainer:
             self.settings_service,
             self._events,
             alias_service=self.alias_service,
+            expiry_resolution_service=self.expiry_resolution_service,
         )
 
     def _create_backup_service(self) -> BackupService:
@@ -382,6 +416,7 @@ class ApplicationContainer:
         info.update(self._paths.describe())
         try:
             info["Сертификатов в базе"] = self.certificate_repository.count()
+            info["Партий в базе сроков годности"] = self.expiry_stock_repository.count()
             info["Псевдонимов"] = self.alias_repository.count()
             info["Обработок в истории"] = self.history_repository.count()
         except Exception as error:

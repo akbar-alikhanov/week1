@@ -23,13 +23,14 @@ from app.core.events import AppEvent, EventBus, ProgressReporter
 from app.core.exceptions import CertMatcherError, OperationCancelledError
 from app.models.history import ProcessingItem, ProcessingRun
 from app.models.matching import MatchResult, MatchStatus
-from app.models.order import OrderDocument
+from app.models.order import OrderDocument, OrderRow
 from app.parsers.excel_order_parser import ExcelOrderParser
 from app.repositories.history_repository import HistoryRepository
 from app.repositories.product_repository import ProductRepository
 from app.services.alias_service import AliasService
 from app.services.certificate_copy_service import CertificateCopyService, CopyReport
 from app.services.excel_writer_service import ExcelWriterService
+from app.services.expiry_resolution_service import ExpiryResolutionService
 from app.services.matching_service import MatchingService
 from app.services.report_service import ReportService
 
@@ -131,6 +132,7 @@ class OrderProcessingService:
         settings_service: SettingsService,
         event_bus: EventBus,
         alias_service: AliasService | None = None,
+        expiry_resolution_service: ExpiryResolutionService | None = None,
     ) -> None:
         """Создаёт оркестратор.
 
@@ -143,6 +145,11 @@ class OrderProcessingService:
             settings_service: Конфигурация приложения.
             event_bus: Шина событий.
             alias_service: Сервис псевдонимов (для самообучения).
+            expiry_resolution_service: Сервис подбора срока годности —
+                новый этап, выполняемый до поиска сертификата (см.
+                :class:`~app.services.expiry_resolution_service.ExpiryResolutionService`).
+                ``None`` полностью отключает этот этап (поведение не
+                отличается от того, что было до его появления).
         """
         self._matching = matching_service
         self._parser = excel_parser
@@ -152,6 +159,7 @@ class OrderProcessingService:
         self._settings = settings_service
         self._events = event_bus
         self._aliases = alias_service
+        self._expiry = expiry_resolution_service
 
     def process(
         self, request: ProcessingRequest, *, reporter: ProgressReporter | None = None
@@ -192,8 +200,50 @@ class OrderProcessingService:
                 reporter.note("Подготовка справочника сертификатов…", "preparing")
             self._matching.prepare(reporter=reporter)
 
+            # --- Шаг 1а. Подбор срока годности (новый этап, до сертификата) -
+            # Выполняется целиком до подбора сертификата и не изменяет сам
+            # MatchingService: для строк без указанного срока подбирает его
+            # по отдельной базе сроков годности и остатков, пробными
+            # вызовами уже существующего MatchingService.match_row проверяя,
+            # находится ли сертификат на каждый кандидат. Отсутствие
+            # сервиса (не настроен) или пустая база — этот шаг не делает
+            # ничего, поведение не отличается от прежнего.
+            #
+            # Строки без требуемого срока запоминаются ДО вызова, чтобы затем
+            # (после подбора сертификата) отличить срок, который подобрал
+            # новый этап, от срока, изначально указанного в заказе, — только
+            # первый разрешено дописать в колонку «требуемый срок» итогового
+            # файла (см. ExcelWriterService и MatchResult.expiry_auto_resolved).
+            rows_missing_expiry = {
+                row.row_number for row in document.rows if row.requested_expiry is None
+            }
+            excluded_rows = self._resolve_expiries(document.rows, reporter)
+            auto_resolved_rows = {
+                row.row_number
+                for row in document.rows
+                if row.row_number in rows_missing_expiry
+                and row.requested_expiry is not None
+                and row.row_number not in excluded_rows
+            }
+
             # --- Шаг 2. Подбор ----------------------------------------------
-            outcome.results = self._matching.match_rows(document.rows, reporter=reporter)
+            eligible_rows = [row for row in document.rows if row.row_number not in excluded_rows]
+            matched_by_row = {
+                result.row.row_number: result
+                for result in self._matching.match_rows(eligible_rows, reporter=reporter)
+            }
+            for row_number in auto_resolved_rows:
+                matched_result = matched_by_row.get(row_number)
+                if matched_result is not None:
+                    matched_result.expiry_auto_resolved = True
+            outcome.results = [
+                (
+                    excluded_rows[row.row_number]
+                    if row.row_number in excluded_rows
+                    else matched_by_row[row.row_number]
+                )
+                for row in document.rows
+            ]
 
             # --- Шаг 3. Разбор неоднозначностей -----------------------------
             if request.resolve_ambiguities is not None:
@@ -263,6 +313,46 @@ class OrderProcessingService:
         return outcome
 
     # ------------------------------------------------------------- шаги
+    def _resolve_expiries(
+        self, rows: list[OrderRow], reporter: ProgressReporter | None
+    ) -> dict[int, MatchResult]:
+        """Подбирает срок годности и строит результаты для исключённых строк.
+
+        Строки, для которых подходящий срок годности подобрать не удалось
+        (товар отсутствует в базе сроков либо ни на одном сроке не хватает
+        количества — см. :class:`~app.services.expiry_resolution_service.ExpiryResolutionService`),
+        не должны попадать в обычный подбор сертификата: он бы проигнорировал
+        причину, по которой новый этап их исключил, и мог случайно подобрать
+        сертификат партии, которой физически не хватает на складе. Для таких
+        строк здесь же формируется финальный результат.
+
+        Args:
+            rows: Строки заказа.
+            reporter: Приёмник прогресса.
+
+        Returns:
+            Отображение «номер строки → готовый результат» только для
+            исключённых строк. Пустой словарь, если сервис не подключён,
+            база сроков годности не настроена или подбор успешен для всех.
+        """
+        if self._expiry is None:
+            return {}
+
+        exclusions = self._expiry.resolve_rows(rows, reporter=reporter)
+        if not exclusions:
+            return {}
+
+        rows_by_number = {row.row_number: row for row in rows}
+        return {
+            row_number: MatchResult(
+                row=rows_by_number[row_number],
+                status=MatchStatus.NOT_FOUND,
+                note=exclusion.note,
+                expiry_not_in_database=exclusion.not_in_database,
+            )
+            for row_number, exclusion in exclusions.items()
+        }
+
     def _resolve_ambiguities(self, outcome: ProcessingOutcome, request: ProcessingRequest) -> None:
         """Передаёт неоднозначные результаты на разрешение пользователю.
 

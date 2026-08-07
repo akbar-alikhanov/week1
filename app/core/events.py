@@ -279,6 +279,8 @@ class AppEvent:
 
     CERTIFICATES_IMPORT_STARTED: Final[str] = "certificates_import.started"
     CERTIFICATES_IMPORT_FINISHED: Final[str] = "certificates_import.finished"
+    EXPIRY_STOCK_IMPORT_STARTED: Final[str] = "expiry_stock_import.started"
+    EXPIRY_STOCK_IMPORT_FINISHED: Final[str] = "expiry_stock_import.finished"
     ORDER_STARTED: Final[str] = "order.started"
     ORDER_FINISHED: Final[str] = "order.finished"
     ALIAS_CREATED: Final[str] = "alias.created"
