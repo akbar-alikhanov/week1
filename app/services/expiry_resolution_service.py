@@ -20,6 +20,20 @@
 доступного количества не входит вообще (доступный остаток такой партии
 считается нулевым), поэтому недостающее количество никогда не «добирается»
 партиями, которые сертификатом не подтверждены.
+
+Этап 3 (ручной режим): если после проверки ВСЕХ партий не подтверждён
+сертификат ни для одной из них (Этап 1 не находит вообще ничего в пределах
+``expiry_tolerance_days``), товар не считается автоматически неподходящим —
+для каждой проверенной партии подбираются ближайшие по сроку сертификаты
+(:meth:`~app.services.matching_service.MatchingService.find_expiry_alternatives`,
+без учёта допуска) и предлагаются пользователю на ручное подтверждение
+(:class:`ManualExpiryReview`). Подтверждённые пользователем партии передаются в
+:meth:`ExpiryResolutionService.apply_manual_selections`, которая направляет
+их в ТУ ЖЕ, неизменённую логику объединения (:meth:`_resolve_combination`) —
+подтверждённая вручную партия участвует в распределении количества наравне
+с партией, подтверждённой автоматически. Если предложить нечего вообще ни
+для одной партии, поведение не отличается от того, что было до появления
+этого этапа: обычное исключение «нет сертификата».
 """
 
 from __future__ import annotations
@@ -29,9 +43,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 
+from app.config.settings import SettingsService
 from app.core.dates import format_date
 from app.core.events import ProgressReporter
 from app.core.text import normalize
+from app.models.certificate_product import CertificateProduct
 from app.models.expiry_stock import ExpiryStockEntry
 from app.models.matching import BatchAllocation, MatchCandidate, MatchStatus
 from app.models.order import OrderRow
@@ -86,6 +102,69 @@ class _BatchCheck:
         return self.candidate is not None
 
 
+@dataclass(frozen=True, slots=True)
+class ExpirySuggestion:
+    """Один вариант сертификата, предложенный вместо результата строгого поиска.
+
+    Строится Этапом 3 (см. докстринг модуля) ТОЛЬКО после того, как Этап 1
+    не подтвердил сертификат ни для одной партии товара. Автоматически
+    нигде не используется — только для показа пользователю и последующего
+    ручного подтверждения (:meth:`ExpiryResolutionService.apply_manual_selections`).
+
+    Attributes:
+        candidate: Кандидат-сертификат (наименование и объём уже
+            подтверждены — не хватает только срока в пределах допуска).
+        difference_days: Расхождение в днях между сроком сертификата и
+            сроком партии, для которой предложен этот вариант.
+    """
+
+    candidate: MatchCandidate
+    difference_days: int
+
+    @property
+    def certificate(self) -> CertificateProduct:
+        """Сертификат-кандидат."""
+        return self.candidate.certificate
+
+
+@dataclass(frozen=True, slots=True)
+class BatchSuggestions:
+    """Партия, для которой Этап 1 не подтвердил сертификат — с вариантами.
+
+    Attributes:
+        entry: Партия из базы сроков годности и остатков.
+        suggestions: Ближайшие по сроку варианты, отсортированные по
+            возрастанию расхождения в днях. Пустой список — для товара и
+            объёма этой партии в базе сертификатов вообще ничего не
+            нашлось, предложить пользователю нечего.
+    """
+
+    entry: ExpiryStockEntry
+    suggestions: list[ExpirySuggestion]
+
+
+@dataclass(frozen=True, slots=True)
+class ManualExpiryReview:
+    """Строка заказа, ожидающая ручного подтверждения сертификата для партий.
+
+    Строится вместо :class:`ExpiryExclusion` (``no_certificate_available``)
+    ТОЛЬКО когда хотя бы у одной проверенной партии есть хотя бы один
+    вариант для предложения — иначе (предложить нечего вообще) поведение не
+    отличается от прежнего: возвращается обычное исключение.
+
+    Attributes:
+        row: Строка заказа.
+        required_quantity: Требуемое количество.
+        batches: Партии, проверенные на Этапе 1, в том же порядке (от новой
+            к старой) — по одной записи на партию независимо от того, есть
+            ли у неё варианты.
+    """
+
+    row: OrderRow
+    required_quantity: float
+    batches: list[BatchSuggestions]
+
+
 class ExpiryResolutionService:
     """Подбирает срок годности для строк заказа перед поиском сертификата.
 
@@ -97,7 +176,10 @@ class ExpiryResolutionService:
     """
 
     def __init__(
-        self, expiry_repository: ExpiryStockRepository, matching_service: MatchingService
+        self,
+        expiry_repository: ExpiryStockRepository,
+        matching_service: MatchingService,
+        settings_service: SettingsService,
     ) -> None:
         """Создаёт сервис подбора срока годности.
 
@@ -106,14 +188,23 @@ class ExpiryResolutionService:
             matching_service: Существующий, неизменяемый сервис подбора
                 сертификата — используется только для пробных вызовов
                 ``match_row`` при проверке «найдётся ли сертификат на этот
-                срок», без единой правки в самом сервисе.
+                срок», без единой правки в самом сервисе, и (Этап 3) для
+                поиска ближайших вариантов в обход допуска.
+            settings_service: Источник параметров — сейчас используется
+                только ``expiry_stock.max_manual_suggestions`` (сколько
+                вариантов предлагать на партию в ручном режиме).
         """
         self._stock = expiry_repository
         self._matching = matching_service
+        self._settings = settings_service
 
     def resolve_rows(
         self, rows: Sequence[OrderRow], *, reporter: ProgressReporter | None = None
-    ) -> tuple[dict[int, ExpiryExclusion], dict[int, list[BatchAllocation]]]:
+    ) -> tuple[
+        dict[int, ExpiryExclusion],
+        dict[int, list[BatchAllocation]],
+        dict[int, ManualExpiryReview],
+    ]:
         """Подбирает срок годности (или комбинацию партий) для каждой строки заказа.
 
         Строкам, для которых подходящий срок найден одной партией (или у
@@ -127,33 +218,38 @@ class ExpiryResolutionService:
                 заказах небыстры).
 
         Returns:
-            Пара словарей, оба ключом — номер строки заказа:
+            Тройка словарей, все ключом — номер строки заказа:
 
             * «строка → причина исключения» для строк, которые не должны
               передаваться в обычный подбор сертификата вообще (товара нет
-              в базе, ни для одной партии нет сертификата, либо суммарного
-              подтверждённого остатка недостаточно);
+              в базе, ни для одной партии нет сертификата и предложить
+              нечего, либо суммарного подтверждённого остатка недостаточно);
             * «строка → распределение по партиям» для строк, выполненных
               несколькими сроками годности сразу (Этап 2) — такие строки
               тоже не должны передаваться в обычный подбор: сертификаты для
-              них уже найдены здесь, по каждой партии отдельно.
+              них уже найдены здесь, по каждой партии отдельно;
+            * «строка → обзор партий с предложениями» (Этап 3) для строк,
+              ожидающих ручного подтверждения — см. :class:`ManualExpiryReview`.
 
-            Оба словаря пустые, если база сроков годности не настроена или
+            Все словари пустые, если база сроков годности не настроена или
             все строки успешно прошли этап одной партией (или уже имели
             указанный срок).
         """
         if self._stock.count() == 0:
-            return {}, {}
+            return {}, {}, {}
 
         if reporter is not None:
             reporter.start(len(rows), "Подбор срока годности…", "expiry")
 
         excluded: dict[int, ExpiryExclusion] = {}
         combined: dict[int, list[BatchAllocation]] = {}
+        pending_review: dict[int, ManualExpiryReview] = {}
         for index, row in enumerate(rows, start=1):
             outcome = self._resolve_row(row)
             if isinstance(outcome, ExpiryExclusion):
                 excluded[row.row_number] = outcome
+            elif isinstance(outcome, ManualExpiryReview):
+                pending_review[row.row_number] = outcome
             elif isinstance(outcome, list):
                 combined[row.row_number] = outcome
             if reporter is not None:
@@ -161,10 +257,54 @@ class ExpiryResolutionService:
 
         if reporter is not None:
             reporter.finish("Подбор срока годности завершён", "expiry")
-        return excluded, combined
+        return excluded, combined, pending_review
+
+    def apply_manual_selections(
+        self, review: ManualExpiryReview, choices: dict[int, ExpirySuggestion]
+    ) -> ExpiryExclusion | list[BatchAllocation]:
+        """Строит распределение по партиям, подтверждённым пользователем вручную.
+
+        Партии без подтверждения (нет записи в ``choices``) считаются не
+        имеющими сертификата — то же правило «нет сертификата → доступно
+        ноль», что и при автоматическом объединении партий (см. докстринг
+        модуля). Дальнейшая проверка суммарного остатка и распределение —
+        существующая, неизменённая логика :meth:`_resolve_combination`: она
+        не отличает вручную подтверждённую партию от партии, подтверждённой
+        автоматически, — обе просто ``_BatchCheck`` с сертификатом.
+
+        Ни выбор пользователя, ни его отсутствие никогда не создаёт и не
+        изменяет запись в словаре соответствий — это отдельное, разовое
+        подтверждение конкретного сертификата для конкретной партии.
+
+        Args:
+            review: Обзор партий с предложенными вариантами (получен из
+                третьего словаря :meth:`resolve_rows`).
+            choices: Выбор пользователя — индекс партии в ``review.batches``
+                → подтверждённый вариант. Партии, для которых пользователь
+                не подтвердил вариант, в словаре отсутствуют.
+
+        Returns:
+            Распределение по партиям либо причина, по которой выполнить
+            заказ не удалось — как и в автоматическом Этапе 2.
+        """
+        checks = [
+            _BatchCheck(
+                entry=batch.entry,
+                candidate=choices[index].candidate if index in choices else None,
+                available=batch.entry.quantity if index in choices else 0.0,
+            )
+            for index, batch in enumerate(review.batches)
+        ]
+        outcome = self._resolve_combination(
+            review.row, review.required_quantity, checks, allow_manual_review=False
+        )
+        assert isinstance(outcome, (ExpiryExclusion, list))  # allow_manual_review=False гарантирует
+        return outcome
 
     # ------------------------------------------------------------- строка
-    def _resolve_row(self, row: OrderRow) -> ExpiryExclusion | list[BatchAllocation] | None:
+    def _resolve_row(
+        self, row: OrderRow
+    ) -> ExpiryExclusion | list[BatchAllocation] | ManualExpiryReview | None:
         """Определяет срок годности (или комбинацию партий) для одной строки заказа.
 
         Реализует алгоритм требования пошагово:
@@ -184,6 +324,9 @@ class ExpiryResolutionService:
            достаточно — распределить требуемое количество между ними
            (жадно, от самой новой партии к самой старой, максимум возможного
            из каждой), иначе — сообщить о нехватке.
+        5. Если сертификат не подтверждён НИ ДЛЯ ОДНОЙ партии вообще — Этап 3:
+           предложить пользователю ближайшие варианты на ручное
+           подтверждение вместо немедленного отказа (см. докстринг модуля).
 
         Args:
             row: Строка заказа (мутируется при успехе одной партией).
@@ -193,7 +336,9 @@ class ExpiryResolutionService:
             (либо срок уже был в заказе, либо Этап 1 подобрал его одной
             партией); список :class:`BatchAllocation` — строка выполнена
             комбинацией нескольких партий (Этап 2), сертификаты для неё уже
-            найдены; :class:`ExpiryExclusion` — строку выполнить не удалось.
+            найдены; :class:`ManualExpiryReview` — строка ожидает ручного
+            подтверждения (Этап 3); :class:`ExpiryExclusion` — строку
+            выполнить не удалось (и предложить нечего).
         """
         if row.requested_expiry is not None:
             # Заказ уже указывает требуемый срок — это осознанный выбор
@@ -239,22 +384,41 @@ class ExpiryResolutionService:
         return self._resolve_combination(row, required_quantity, checks)
 
     def _resolve_combination(
-        self, row: OrderRow, required_quantity: float, checks: list[_BatchCheck]
-    ) -> ExpiryExclusion | list[BatchAllocation]:
+        self,
+        row: OrderRow,
+        required_quantity: float,
+        checks: list[_BatchCheck],
+        *,
+        allow_manual_review: bool = True,
+    ) -> ExpiryExclusion | list[BatchAllocation] | ManualExpiryReview:
         """Этап 2: пытается покрыть заказ комбинацией нескольких партий.
 
         Args:
             row: Строка заказа.
             required_quantity: Требуемое количество.
             checks: Результаты проверки всех партий товара (см. :meth:`_resolve_row`).
+            allow_manual_review: Разрешить ли предложить Этап 3 (ручные
+                варианты), если сертификат не подтверждён ни для одной
+                партии. ``False`` — используется только
+                :meth:`apply_manual_selections`, чтобы после уже
+                применённого ручного выбора не строить новое предложение
+                вместо окончательного результата.
 
         Returns:
-            Распределение по партиям либо причина, по которой выполнить
-            заказ не удалось.
+            Распределение по партиям; обзор для ручного подтверждения
+            (Этап 3, только если ``allow_manual_review``); либо причина, по
+            которой выполнить заказ не удалось.
         """
         certified = [check for check in checks if check.has_certificate]
 
         if not certified:
+            if allow_manual_review:
+                review = self._build_manual_review(row, required_quantity, checks)
+                if review is not None:
+                    self._log_diagnostics(
+                        row, required_quantity, checks, outcome="ожидает ручного подтверждения"
+                    )
+                    return review
             exclusion = ExpiryExclusion(
                 note="Для доступных сроков не найден подходящий сертификат.",
                 no_certificate_available=True,
@@ -280,6 +444,57 @@ class ExpiryResolutionService:
             row, required_quantity, checks, outcome="комбинация партий", allocations=allocations
         )
         return allocations
+
+    def _build_manual_review(
+        self, row: OrderRow, required_quantity: float, checks: list[_BatchCheck]
+    ) -> ManualExpiryReview | None:
+        """Этап 3: подбирает ближайшие варианты для партий без сертификата.
+
+        Вызывается только когда сертификат не подтверждён НИ ДЛЯ ОДНОЙ
+        партии (см. :meth:`_resolve_combination`). Для каждой партии ищет
+        ближайшие по сроку сертификаты в обход допуска
+        (:meth:`~app.services.matching_service.MatchingService.find_expiry_alternatives`)
+        — тем же наименованием, объёмом и словарём, что и обычный подбор.
+
+        Args:
+            row: Строка заказа.
+            required_quantity: Требуемое количество.
+            checks: Результаты проверки всех партий товара (сертификат не
+                подтверждён ни для одной).
+
+        Returns:
+            Обзор с предложениями либо ``None``, если предложить нечего ни
+            для одной партии — тогда вызывающая сторона возвращает обычное
+            исключение, как и до появления этого этапа.
+        """
+        limit = self._settings.current.expiry_stock.max_manual_suggestions
+        batches: list[BatchSuggestions] = []
+        has_suggestions = False
+        for check in checks:
+            batch_expiry = check.entry.expiry_date
+            if batch_expiry is None:
+                batches.append(BatchSuggestions(entry=check.entry, suggestions=[]))
+                continue
+
+            alternatives = self._matching.find_expiry_alternatives(row, batch_expiry, limit=limit)
+            suggestions: list[ExpirySuggestion] = []
+            for candidate in alternatives:
+                certificate_expiry = candidate.certificate.expiry_date
+                if certificate_expiry is None:
+                    continue
+                suggestions.append(
+                    ExpirySuggestion(
+                        candidate=candidate,
+                        difference_days=abs((certificate_expiry - batch_expiry).days),
+                    )
+                )
+            if suggestions:
+                has_suggestions = True
+            batches.append(BatchSuggestions(entry=check.entry, suggestions=suggestions))
+
+        if not has_suggestions:
+            return None
+        return ManualExpiryReview(row=row, required_quantity=required_quantity, batches=batches)
 
     def _allocate(
         self, certified: list[_BatchCheck], required_quantity: float

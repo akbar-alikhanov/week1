@@ -22,7 +22,7 @@ from app.config.settings import SettingsService
 from app.core.events import AppEvent, EventBus, ProgressReporter
 from app.core.exceptions import CertMatcherError, OperationCancelledError
 from app.models.history import ProcessingItem, ProcessingRun
-from app.models.matching import BatchAllocation, MatchResult, MatchStatus
+from app.models.matching import BatchAllocation, MatchResult, MatchSource, MatchStatus
 from app.models.order import OrderDocument, OrderRow
 from app.parsers.excel_order_parser import ExcelOrderParser
 from app.repositories.history_repository import HistoryRepository
@@ -30,7 +30,11 @@ from app.repositories.product_repository import ProductRepository
 from app.services.alias_service import AliasService
 from app.services.certificate_copy_service import CertificateCopyService, CopyReport
 from app.services.excel_writer_service import ExcelWriterService
-from app.services.expiry_resolution_service import ExpiryResolutionService
+from app.services.expiry_resolution_service import (
+    ExpiryResolutionService,
+    ExpirySuggestion,
+    ManualExpiryReview,
+)
 from app.services.matching_service import MatchingService
 from app.services.report_service import ReportService
 
@@ -44,6 +48,17 @@ _LOGGER = logging.getLogger(__name__)
 #: ``None``, если пользователь отказался разбирать оставшиеся неоднозначности.
 AmbiguityResolver = Callable[[MatchResult, int], "int | None"]
 
+#: Обработчик ручного подтверждения сертификата для партий срока годности
+#: (Этап 3 подбора срока годности — см. ``ExpiryResolutionService``).
+#:
+#: Принимает обзор партий с предложениями и количество ещё не разобранных
+#: позиций (как и ``AmbiguityResolver``). Возвращает словарь «индекс партии
+#: в ``review.batches`` → подтверждённый вариант» — партии, отсутствующие в
+#: словаре, считаются неподтверждёнными (пустой словарь — ничего не
+#: подтверждено для этой строки, переход к следующей); ``None`` — пользователь
+#: отказался разбирать оставшиеся позиции.
+ExpiryManualResolver = Callable[[ManualExpiryReview, int], "dict[int, ExpirySuggestion] | None"]
+
 
 @dataclass(slots=True)
 class ProcessingRequest:
@@ -56,6 +71,10 @@ class ProcessingRequest:
         copy_certificates: Копировать ли PDF в папку результата.
         write_report: Формировать ли отчёт.
         resolve_ambiguities: Обработчик окна неоднозначного выбора.
+        resolve_expiry_manually: Обработчик ручного подтверждения сертификата
+            для партий срока годности (Этап 3). ``None`` — строки, для
+            которых нечего подобрать автоматически, помечаются обычным
+            исключением «нет сертификата», как и до появления этого этапа.
         learn_from_choices: Создавать ли псевдонимы по ручным выборам.
     """
 
@@ -65,6 +84,7 @@ class ProcessingRequest:
     copy_certificates: bool = True
     write_report: bool = True
     resolve_ambiguities: AmbiguityResolver | None = None
+    resolve_expiry_manually: ExpiryManualResolver | None = None
     learn_from_choices: bool = True
 
 
@@ -224,7 +244,9 @@ class OrderProcessingService:
             rows_missing_expiry = {
                 row.row_number for row in document.rows if row.requested_expiry is None
             }
-            expiry_stage_results = self._resolve_expiries(document.rows, reporter)
+            expiry_stage_results = self._resolve_expiries(
+                document.rows, reporter, request.resolve_expiry_manually
+            )
             auto_resolved_rows = {
                 row.row_number
                 for row in document.rows
@@ -323,31 +345,41 @@ class OrderProcessingService:
 
     # ------------------------------------------------------------- шаги
     def _resolve_expiries(
-        self, rows: list[OrderRow], reporter: ProgressReporter | None
+        self,
+        rows: list[OrderRow],
+        reporter: ProgressReporter | None,
+        resolver: ExpiryManualResolver | None,
     ) -> dict[int, MatchResult]:
         """Подбирает срок годности и строит результаты для строк, минующих обычный подбор.
 
-        Две категории строк не должны попадать в обычный подбор сертификата
+        Три категории строк не должны попадать в обычный подбор сертификата
         (см. :class:`~app.services.expiry_resolution_service.ExpiryResolutionService`):
 
         * исключённые — товар отсутствует в базе сроков, ни для одной его
-          партии не подтверждён сертификат, либо суммарного подтверждённого
-          остатка недостаточно — обычный подбор проигнорировал бы причину
-          исключения и мог случайно подобрать сертификат партии, которой
-          физически не хватает на складе;
+          партии не подтверждён (и нечего предложить вручную) сертификат,
+          либо суммарного подтверждённого остатка недостаточно — обычный
+          подбор проигнорировал бы причину исключения и мог случайно
+          подобрать сертификат партии, которой физически не хватает на
+          складе;
         * выполненные комбинацией нескольких партий (Этап 2) — сертификаты
           для них уже найдены по каждой партии отдельно, обычному подбору
           там искать больше нечего, а сам он умеет выбрать только один
-          сертификат на строку.
+          сертификат на строку;
+        * ожидающие ручного подтверждения (Этап 3) — сертификат не
+          подтверждён ни для одной партии автоматически, но есть варианты
+          на выбор пользователю (:meth:`_resolve_expiry_manually`).
 
-        Для обеих категорий здесь же формируется финальный результат.
+        Для всех трёх категорий здесь же формируется финальный результат.
 
         Args:
             rows: Строки заказа.
             reporter: Приёмник прогресса.
+            resolver: Обработчик ручного подтверждения (Этап 3). ``None`` —
+                строки третьей категории получают то же исключение, что и
+                строки первой (см. :meth:`_resolve_expiry_manually`).
 
         Returns:
-            Отображение «номер строки → готовый результат» для обеих
+            Отображение «номер строки → готовый результат» для всех трёх
             категорий выше. Пустой словарь, если сервис не подключён, база
             сроков годности не настроена или обычный подбор нужен для всех
             строк как есть.
@@ -355,8 +387,8 @@ class OrderProcessingService:
         if self._expiry is None:
             return {}
 
-        excluded, combined = self._expiry.resolve_rows(rows, reporter=reporter)
-        if not excluded and not combined:
+        excluded, combined, pending_review = self._expiry.resolve_rows(rows, reporter=reporter)
+        if not excluded and not combined and not pending_review:
             return {}
 
         rows_by_number = {row.row_number: row for row in rows}
@@ -372,7 +404,77 @@ class OrderProcessingService:
         }
         for row_number, allocations in combined.items():
             results[row_number] = _build_combined_result(rows_by_number[row_number], allocations)
+        if pending_review:
+            self._resolve_expiry_manually(pending_review, resolver, results)
         return results
+
+    def _resolve_expiry_manually(
+        self,
+        pending_review: dict[int, ManualExpiryReview],
+        resolver: ExpiryManualResolver | None,
+        results: dict[int, MatchResult],
+    ) -> None:
+        """Разбирает партии, ожидающие ручного подтверждения (Этап 3).
+
+        Без резолвера (CLI, либо GUI без подключённого разбора) поведение
+        не отличается от того, что было бы без Этапа 3 вообще: строка
+        получает то же исключение «нет сертификата», что и раньше — этап
+        полностью незаметен, если его не используют, как и остальные этапы
+        подбора срока годности.
+
+        Args:
+            pending_review: Строки, ожидающие подтверждения (третий словарь
+                из ``ExpiryResolutionService.resolve_rows``) — номер строки
+                → обзор партий с предложениями.
+            resolver: Обработчик окна ручного подтверждения.
+            results: Отображение «номер строки → результат» — заполняется
+                на месте.
+        """
+        assert self._expiry is not None
+        reviews = list(pending_review.values())
+
+        if resolver is None:
+            for review in reviews:
+                self._apply_expiry_choice(review, {}, results)
+            return
+
+        _LOGGER.info("Ожидают ручного подтверждения срока годности позиций: %s", len(reviews))
+        for position, review in enumerate(reviews):
+            choices = resolver(review, len(reviews) - position - 1)
+            if choices is None:
+                _LOGGER.info("Пользователь прекратил разбор партий срока годности")
+                for remaining in reviews[position:]:
+                    self._apply_expiry_choice(remaining, {}, results)
+                break
+            self._apply_expiry_choice(review, choices, results)
+
+    def _apply_expiry_choice(
+        self,
+        review: ManualExpiryReview,
+        choices: dict[int, ExpirySuggestion],
+        results: dict[int, MatchResult],
+    ) -> None:
+        """Строит итоговый результат по подтверждённым пользователем партиям.
+
+        Пустой ``choices`` (ничего не подтверждено — нет резолвера,
+        пользователь прекратил разбор или явно не выбрал ни одного варианта
+        для этой строки) закономерно приводит к тому же исключению «нет
+        сертификата», что и без Этапа 3 вообще — это гарантирует сам
+        ``ExpiryResolutionService.apply_manual_selections``, а не отдельный
+        код здесь.
+        """
+        assert self._expiry is not None
+        outcome = self._expiry.apply_manual_selections(review, choices)
+        row_number = review.row.row_number
+        if isinstance(outcome, list):
+            results[row_number] = _build_combined_result(review.row, outcome)
+        else:
+            results[row_number] = MatchResult(
+                row=review.row,
+                status=MatchStatus.NOT_FOUND,
+                note=outcome.note,
+                expiry_no_certificate_available=outcome.no_certificate_available,
+            )
 
     def _resolve_ambiguities(self, outcome: ProcessingOutcome, request: ProcessingRequest) -> None:
         """Передаёт неоднозначные результаты на разрешение пользователю.
@@ -484,17 +586,25 @@ def _build_combined_result(row: OrderRow, allocations: list[BatchAllocation]) ->
     ``batch_allocations`` — именно её читает
     :class:`~app.services.excel_writer_service.ExcelWriterService`.
 
+    Статус — :attr:`~app.models.matching.MatchStatus.MANUAL`, если хотя бы
+    одна из использованных партий подтверждена вручную (Этап 3,
+    :attr:`~app.models.matching.MatchSource.MANUAL`), иначе
+    :attr:`~app.models.matching.MatchStatus.MATCHED`, как и раньше — не
+    декоративное различие: отчёт и история отдельно считают позиции,
+    подтверждённые человеком (:attr:`ProcessingOutcome.manual`).
+
     Args:
         row: Строка заказа.
         allocations: Партии, использованные для её выполнения (Этап 2), в
             порядке использования — от новой к старой.
 
     Returns:
-        Результат со статусом :attr:`~app.models.matching.MatchStatus.MATCHED`.
+        Результат со статусом ``MATCHED`` либо ``MANUAL``.
     """
+    manual = any(allocation.candidate.source is MatchSource.MANUAL for allocation in allocations)
     return MatchResult(
         row=row,
-        status=MatchStatus.MATCHED,
+        status=MatchStatus.MANUAL if manual else MatchStatus.MATCHED,
         candidates=[allocation.candidate for allocation in allocations],
         selected_index=0,
         note="Заказ выполнен несколькими партиями с разными сроками годности",

@@ -42,11 +42,17 @@ from app.ai.vector_index import VectorIndex
 from app.config.settings import SettingsService
 from app.core.events import ProgressReporter, ProgressUpdate
 from app.database.connection import Database
+from app.models.matching import MatchSource
 from app.models.order import OrderRow
 from app.repositories.alias_repository import AliasRepository
 from app.repositories.certificate_product_repository import CertificateProductRepository
 from app.repositories.expiry_stock_repository import ExpiryStockRepository
-from app.services.expiry_resolution_service import ExpiryExclusion, ExpiryResolutionService
+from app.services.expiry_resolution_service import (
+    ExpiryExclusion,
+    ExpiryResolutionService,
+    ExpirySuggestion,
+    ManualExpiryReview,
+)
 from app.services.matching_service import MatchingService
 from tests.conftest import make_certificate, make_expiry_entry
 
@@ -55,15 +61,22 @@ from tests.conftest import make_certificate, make_expiry_entry
 _PRODUCT = "Крем детский 100 мл"
 
 
-def _make_matching_service(database: Database, tmp_path: Path) -> MatchingService:
+def _make_settings_service(tmp_path: Path) -> SettingsService:
+    """Собирает сервис настроек поверх временного файла (значения по умолчанию)."""
+    settings_service = SettingsService(tmp_path / "settings.json")
+    settings_service.load()
+    return settings_service
+
+
+def _make_matching_service(
+    database: Database, settings_service: SettingsService
+) -> MatchingService:
     """Собирает минимальный, полностью настоящий сервис подбора сертификата.
 
     Используется только для пробных вызовов ``match_row`` внутри
     :class:`ExpiryResolutionService` — сам сервис подбора этим не изменяется
     и не подменяется.
     """
-    settings_service = SettingsService(tmp_path / "settings.json")
-    settings_service.load()
     backend = EmbeddingBackend(enabled=False)
     return MatchingService(
         CertificateProductRepository(database),
@@ -79,8 +92,11 @@ def expiry_resolution_service(
     database: Database, expiry_stock_repository: ExpiryStockRepository, tmp_path: Path
 ) -> ExpiryResolutionService:
     """Собранный сервис подбора срока годности поверх временной базы."""
+    settings_service = _make_settings_service(tmp_path)
     return ExpiryResolutionService(
-        expiry_stock_repository, _make_matching_service(database, tmp_path)
+        expiry_stock_repository,
+        _make_matching_service(database, settings_service),
+        settings_service,
     )
 
 
@@ -118,7 +134,7 @@ class TestPicksNewestSufficientDate:
         )
 
         row = _row(1, quantity=50)
-        excluded, combined = expiry_resolution_service.resolve_rows([row])
+        excluded, combined, _ = expiry_resolution_service.resolve_rows([row])
 
         assert excluded == {}
         assert combined == {}
@@ -152,7 +168,7 @@ class TestPicksNewestSufficientDate:
         )
 
         row = _row(1, quantity=50)
-        excluded, combined = expiry_resolution_service.resolve_rows([row])
+        excluded, combined, _ = expiry_resolution_service.resolve_rows([row])
 
         assert excluded == {}
         assert combined == {}
@@ -180,7 +196,7 @@ class TestFallsBackOnInsufficientQuantity:
         )
 
         row = _row(1, quantity=50)
-        excluded, combined = expiry_resolution_service.resolve_rows([row])
+        excluded, combined, _ = expiry_resolution_service.resolve_rows([row])
 
         assert excluded == {}
         assert combined == {}
@@ -215,7 +231,7 @@ class TestFallsBackWhenCertificateNotFoundForDate:
         )
 
         row = _row(1, quantity=50)
-        excluded, combined = expiry_resolution_service.resolve_rows([row])
+        excluded, combined, _ = expiry_resolution_service.resolve_rows([row])
 
         assert excluded == {}
         assert combined == {}
@@ -242,7 +258,7 @@ class TestFallsBackWhenCertificateNotFoundForDate:
         )
 
         row = _row(1, quantity=50)
-        excluded, combined = expiry_resolution_service.resolve_rows([row])
+        excluded, combined, _ = expiry_resolution_service.resolve_rows([row])
 
         assert combined == {}
         assert excluded == {
@@ -268,7 +284,7 @@ class TestProductNotInDatabase:
         )
 
         row = _row(1, product_name=_PRODUCT, quantity=50)
-        excluded, combined = expiry_resolution_service.resolve_rows([row])
+        excluded, combined, _ = expiry_resolution_service.resolve_rows([row])
 
         assert combined == {}
         assert excluded == {
@@ -313,7 +329,7 @@ class TestCombinationOfMultipleBatches:
         )
 
         row = _row(1, quantity=1500)
-        excluded, combined = expiry_resolution_service.resolve_rows([row])
+        excluded, combined, _ = expiry_resolution_service.resolve_rows([row])
 
         assert excluded == {}
         assert row.requested_expiry is None  # у комбинации нет одного срока
@@ -355,7 +371,7 @@ class TestCombinationOfMultipleBatches:
         )
 
         row = _row(1, quantity=100)
-        excluded, combined = expiry_resolution_service.resolve_rows([row])
+        excluded, combined, _ = expiry_resolution_service.resolve_rows([row])
 
         assert combined == {}
         assert excluded == {
@@ -401,7 +417,7 @@ class TestCombinationOfMultipleBatches:
         )
 
         row = _row(1, quantity=1000)
-        excluded, combined = expiry_resolution_service.resolve_rows([row])
+        excluded, combined, _ = expiry_resolution_service.resolve_rows([row])
 
         assert combined == {}
         assert excluded == {
@@ -442,7 +458,7 @@ class TestCombinationOfMultipleBatches:
         )
 
         row = _row(1, quantity=1000)
-        excluded, combined = expiry_resolution_service.resolve_rows([row])
+        excluded, combined, _ = expiry_resolution_service.resolve_rows([row])
 
         assert excluded == {}
         allocations = combined[1]
@@ -482,7 +498,7 @@ class TestCombinationOfMultipleBatches:
         )
 
         row = _row(1, quantity=30)
-        excluded, combined = expiry_resolution_service.resolve_rows([row])
+        excluded, combined, _ = expiry_resolution_service.resolve_rows([row])
 
         assert excluded == {}
         allocations = combined[1]
@@ -524,7 +540,7 @@ class TestInsufficientEvenAfterCombination:
         )
 
         row = _row(1, quantity=1500)
-        excluded, combined = expiry_resolution_service.resolve_rows([row])
+        excluded, combined, _ = expiry_resolution_service.resolve_rows([row])
 
         assert combined == {}
         assert excluded == {
@@ -533,6 +549,272 @@ class TestInsufficientEvenAfterCombination:
         assert excluded[1].not_in_database is False
         assert excluded[1].no_certificate_available is False
         assert row.requested_expiry is None
+
+
+class TestManualReviewStage:
+    """Этап 3: если сертификат не подтверждён ни для одной партии — предложить варианты."""
+
+    def test_returns_pending_review_with_suggestion_beyond_tolerance(
+        self,
+        expiry_resolution_service: ExpiryResolutionService,
+        expiry_stock_repository: ExpiryStockRepository,
+        certificate_repository: CertificateProductRepository,
+    ) -> None:
+        """Сертификат вне допуска не подтверждается автоматически, но предлагается вручную."""
+        batch_date = dt.date(2029, 6, 1)
+        certificate_repository.replace_all(
+            [
+                make_certificate(
+                    _PRODUCT,
+                    expiry_date=batch_date + dt.timedelta(days=100),
+                    certificate_number="UZ.1",
+                )
+            ]
+        )
+        expiry_stock_repository.replace_all(
+            [make_expiry_entry(_PRODUCT, expiry_date=batch_date, quantity=100)]
+        )
+
+        row = _row(1, quantity=50)
+        excluded, combined, pending_review = expiry_resolution_service.resolve_rows([row])
+
+        assert excluded == {}
+        assert combined == {}
+        assert set(pending_review) == {1}
+        review = pending_review[1]
+        assert review.row is row
+        assert review.required_quantity == 50
+        assert len(review.batches) == 1
+        batch = review.batches[0]
+        assert batch.entry.expiry_date == batch_date
+        assert [s.certificate.certificate_number for s in batch.suggestions] == ["UZ.1"]
+        assert batch.suggestions[0].difference_days == 100
+
+    def test_all_batches_receive_suggestions(
+        self,
+        expiry_resolution_service: ExpiryResolutionService,
+        expiry_stock_repository: ExpiryStockRepository,
+        certificate_repository: CertificateProductRepository,
+    ) -> None:
+        """Варианты подбираются для ВСЕХ проверенных партий, а не только для первой.
+
+        Пример из требования: три партии, ни для одной строгий поиск ничего
+        не находит — второй этап обязан проверить их все, а не
+        остановиться после первой неудачи.
+        """
+        certificate_repository.replace_all(
+            [make_certificate(_PRODUCT, expiry_date=dt.date(2030, 1, 1), certificate_number="UZ.1")]
+        )
+        expiry_stock_repository.replace_all(
+            [
+                make_expiry_entry(_PRODUCT, expiry_date=dt.date(2029, 1, 1), quantity=1600),
+                make_expiry_entry(_PRODUCT, expiry_date=dt.date(2028, 1, 10), quantity=7000),
+                make_expiry_entry(_PRODUCT, expiry_date=dt.date(2027, 6, 15), quantity=10000),
+            ]
+        )
+
+        row = _row(1, quantity=1000)
+        excluded, combined, pending_review = expiry_resolution_service.resolve_rows([row])
+
+        assert excluded == {}
+        assert combined == {}
+        review = pending_review[1]
+        assert len(review.batches) == 3
+        assert all(batch.suggestions for batch in review.batches)
+        assert {batch.entry.expiry_date for batch in review.batches} == {
+            dt.date(2029, 1, 1),
+            dt.date(2028, 1, 10),
+            dt.date(2027, 6, 15),
+        }
+
+    def test_suggestions_capped_at_default_limit_and_sorted(
+        self,
+        expiry_resolution_service: ExpiryResolutionService,
+        expiry_stock_repository: ExpiryStockRepository,
+        certificate_repository: CertificateProductRepository,
+    ) -> None:
+        """По умолчанию предлагается не больше 3 вариантов, ближайших по сроку."""
+        batch_date = dt.date(2029, 6, 1)
+        certificate_repository.replace_all(
+            [
+                make_certificate(
+                    _PRODUCT,
+                    expiry_date=batch_date + dt.timedelta(days=offset),
+                    certificate_number=str(offset),
+                )
+                for offset in (300, 100, 200, 400, 150)
+            ]
+        )
+        expiry_stock_repository.replace_all(
+            [make_expiry_entry(_PRODUCT, expiry_date=batch_date, quantity=100)]
+        )
+
+        row = _row(1, quantity=50)
+        _, _, pending_review = expiry_resolution_service.resolve_rows([row])
+
+        suggestions = pending_review[1].batches[0].suggestions
+        assert len(suggestions) == 3
+        assert [s.difference_days for s in suggestions] == [100, 150, 200]
+
+    def test_no_pending_review_when_nothing_to_suggest(
+        self,
+        expiry_resolution_service: ExpiryResolutionService,
+        expiry_stock_repository: ExpiryStockRepository,
+    ) -> None:
+        """Если предложить нечего вообще ни для одной партии — обычное исключение, как раньше."""
+        expiry_stock_repository.replace_all(
+            [
+                make_expiry_entry(_PRODUCT, expiry_date=dt.date(2029, 1, 1), quantity=100),
+                make_expiry_entry(_PRODUCT, expiry_date=dt.date(2028, 1, 1), quantity=100),
+            ]
+        )
+
+        row = _row(1, quantity=50)
+        excluded, combined, pending_review = expiry_resolution_service.resolve_rows([row])
+
+        assert pending_review == {}
+        assert combined == {}
+        assert excluded == {
+            1: ExpiryExclusion(
+                note="Для доступных сроков не найден подходящий сертификат.",
+                no_certificate_available=True,
+            )
+        }
+
+
+class TestApplyManualSelections:
+    """Проверки применения ручного выбора пользователя (после показа предложений)."""
+
+    def test_confirmed_batches_are_combined_like_automatic_ones(
+        self,
+        expiry_resolution_service: ExpiryResolutionService,
+        expiry_stock_repository: ExpiryStockRepository,
+        certificate_repository: CertificateProductRepository,
+    ) -> None:
+        """Подтверждённые вручную партии участвуют в распределении количества.
+
+        Переиспользуется та же логика объединения, что и для партий,
+        подтверждённых автоматически (Этап 2) — источник подтверждённого
+        кандидата при этом ``MatchSource.MANUAL``, а не строгий/нечёткий
+        поиск.
+        """
+        first_date = dt.date(2029, 6, 1)
+        second_date = dt.date(2028, 1, 1)
+        certificate_repository.replace_all(
+            [
+                make_certificate(
+                    _PRODUCT,
+                    expiry_date=first_date + dt.timedelta(days=90),
+                    certificate_number="UZ.1",
+                ),
+                make_certificate(
+                    _PRODUCT,
+                    expiry_date=second_date + dt.timedelta(days=90),
+                    certificate_number="UZ.2",
+                ),
+            ]
+        )
+        expiry_stock_repository.replace_all(
+            [
+                make_expiry_entry(_PRODUCT, expiry_date=first_date, quantity=40),
+                make_expiry_entry(_PRODUCT, expiry_date=second_date, quantity=60),
+            ]
+        )
+
+        row = _row(1, quantity=100)
+        _, _, pending_review = expiry_resolution_service.resolve_rows([row])
+        review = pending_review[1]
+        assert len(review.batches) == 2
+
+        choices: dict[int, ExpirySuggestion] = {
+            index: batch.suggestions[0]
+            for index, batch in enumerate(review.batches)
+            if batch.suggestions
+        }
+        outcome = expiry_resolution_service.apply_manual_selections(review, choices)
+
+        assert isinstance(outcome, list)
+        assert sum(allocation.quantity for allocation in outcome) == 100
+        assert {allocation.candidate.source for allocation in outcome} == {MatchSource.MANUAL}
+        assert {allocation.certificate.certificate_number for allocation in outcome} == {
+            "UZ.1",
+            "UZ.2",
+        }
+
+    def test_partial_confirmation_is_insufficient(
+        self,
+        expiry_resolution_service: ExpiryResolutionService,
+        expiry_stock_repository: ExpiryStockRepository,
+        certificate_repository: CertificateProductRepository,
+    ) -> None:
+        """Подтверждённых партий не хватает — обычное исключение «недостаточно остатка»."""
+        first_date = dt.date(2029, 6, 1)
+        second_date = dt.date(2028, 1, 1)
+        certificate_repository.replace_all(
+            [
+                make_certificate(
+                    _PRODUCT,
+                    expiry_date=first_date + dt.timedelta(days=90),
+                    certificate_number="UZ.1",
+                )
+            ]
+        )
+        expiry_stock_repository.replace_all(
+            [
+                make_expiry_entry(_PRODUCT, expiry_date=first_date, quantity=40),
+                make_expiry_entry(_PRODUCT, expiry_date=second_date, quantity=60),
+            ]
+        )
+
+        row = _row(1, quantity=100)
+        _, _, pending_review = expiry_resolution_service.resolve_rows([row])
+        review = pending_review[1]
+
+        # Подтверждена только первая партия (40 шт.) — второй нечего предложить.
+        choices = {0: review.batches[0].suggestions[0]}
+        outcome = expiry_resolution_service.apply_manual_selections(review, choices)
+
+        assert outcome == ExpiryExclusion(
+            note="Недостаточно остатка по партиям с подходящими сертификатами."
+        )
+
+    def test_no_confirmation_falls_back_to_no_certificate_exclusion(
+        self,
+        expiry_resolution_service: ExpiryResolutionService,
+        expiry_stock_repository: ExpiryStockRepository,
+        certificate_repository: CertificateProductRepository,
+    ) -> None:
+        """Пустой выбор пользователя — то же исключение, что и без Этапа 3 вообще.
+
+        Проверяет заодно, что применение пустого выбора никогда не строит
+        новое предложение вместо окончательного результата (тип результата
+        — не :class:`ManualExpiryReview`).
+        """
+        batch_date = dt.date(2029, 6, 1)
+        certificate_repository.replace_all(
+            [
+                make_certificate(
+                    _PRODUCT,
+                    expiry_date=batch_date + dt.timedelta(days=100),
+                    certificate_number="UZ.1",
+                )
+            ]
+        )
+        expiry_stock_repository.replace_all(
+            [make_expiry_entry(_PRODUCT, expiry_date=batch_date, quantity=100)]
+        )
+
+        row = _row(1, quantity=50)
+        _, _, pending_review = expiry_resolution_service.resolve_rows([row])
+        review = pending_review[1]
+
+        outcome = expiry_resolution_service.apply_manual_selections(review, {})
+
+        assert not isinstance(outcome, ManualExpiryReview)
+        assert outcome == ExpiryExclusion(
+            note="Для доступных сроков не найден подходящий сертификат.",
+            no_certificate_available=True,
+        )
 
 
 class TestExistingRequestedExpiryIsNeverTouched:
@@ -557,7 +839,7 @@ class TestExistingRequestedExpiryIsNeverTouched:
         )
 
         row = _row(1, product_name=_PRODUCT, requested_expiry=dt.date(2030, 1, 1))
-        excluded, combined = expiry_resolution_service.resolve_rows([row])
+        excluded, combined, _ = expiry_resolution_service.resolve_rows([row])
 
         assert excluded == {}
         assert combined == {}
@@ -574,7 +856,7 @@ class TestInertWhenDatabaseEmpty:
         untouched = _row(1, product_name=_PRODUCT, requested_expiry=None)
         already_set = _row(2, product_name="Ещё товар", requested_expiry=dt.date(2029, 1, 1))
 
-        excluded, combined = expiry_resolution_service.resolve_rows([untouched, already_set])
+        excluded, combined, _ = expiry_resolution_service.resolve_rows([untouched, already_set])
 
         assert excluded == {}
         assert combined == {}
@@ -625,7 +907,7 @@ class TestMultipleRows:
         excluded_row = _row(3, product_name="Совсем другой товар", quantity=10)
         combined_row = _row(5, product_name="Комбинируемый товар", quantity=15)
 
-        excluded, combined = expiry_resolution_service.resolve_rows(
+        excluded, combined, _ = expiry_resolution_service.resolve_rows(
             [resolved_row, excluded_row, combined_row]
         )
 

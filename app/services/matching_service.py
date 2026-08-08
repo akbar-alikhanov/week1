@@ -272,6 +272,129 @@ class MatchingService:
             candidate.rank = rank
         return candidates[:limit]
 
+    def find_expiry_alternatives(
+        self, row: OrderRow, batch_expiry: date, *, limit: int
+    ) -> list[MatchCandidate]:
+        """Ищет ближайшие по сроку сертификаты в обход допуска ``expiry_tolerance_days``.
+
+        Второй (ручной) этап подбора срока годности
+        (:class:`~app.services.expiry_resolution_service.ExpiryResolutionService`)
+        вызывает этот метод ТОЛЬКО после того, как обычный строгий подбор не
+        подтвердил сертификат ни для одной партии товара. Название и объём
+        разрешаются точно так же, как в обычном подборе — тем же словарём,
+        если для товара есть запись (строгим SQL-поиском по официальному
+        наименованию и объёму), иначе тем же нечётким/семантическим поиском
+        и тем же порогом ``min_name_score``. Меняется только срок: жёсткое
+        исключение по допуску (:func:`~app.ai.scorer.is_hard_mismatch`) не
+        применяется, а результат сортируется по абсолютной разнице в днях от
+        ``batch_expiry``, а не по взвешенной оценке.
+
+        Метод ничего не решает и не выбирает сам — результат предназначен
+        только для показа пользователю и ручного подтверждения; ни один из
+        возвращённых кандидатов не должен использоваться автоматически.
+
+        Args:
+            row: Строка заказа (используется её наименование/словарь; срок,
+                уже записанный в самой строке, не участвует — сравнение
+                идёт с ``batch_expiry``).
+            batch_expiry: Срок годности партии, для которой ищутся варианты.
+            limit: Максимальное количество вариантов в результате.
+
+        Returns:
+            Кандидаты в порядке возрастания расхождения в днях от
+            ``batch_expiry`` с источником :attr:`~app.models.matching.MatchSource.MANUAL`
+            (независимо от того, чем изначально был разрешён товар) — ни
+            один из них не мог бы появиться в результате обычного
+            автоматического подбора. Кандидаты без известного срока
+            сертификата не включаются — сравнивать не с чем.
+        """
+        if not self._prepared:
+            self.prepare()
+
+        settings = self._settings.current.matching
+        context = ScoringContext.create(settings)
+
+        original_expiry = row.requested_expiry
+        row.requested_expiry = batch_expiry
+        try:
+            candidates = self._alias_expiry_alternatives(row, context)
+            if candidates is None:
+                candidates = self._collect_candidates(
+                    row,
+                    context,
+                    limit=max(limit * 5, settings.max_candidates),
+                    ignore_expiry_tolerance=True,
+                )
+        finally:
+            row.requested_expiry = original_expiry
+
+        # Источник переопределяется безусловно, независимо от того, как был
+        # разрешён товар (словарь/точное совпадение/нечёткий/семантический
+        # поиск): в отличие от обычного конвейера, ни один из этих
+        # кандидатов не мог бы появиться в автоматическом решении — они
+        # существуют только благодаря снятому допуску по сроку, поэтому
+        # источник честно отражает это как «ручной выбор», а не как то,
+        # что могло бы сойти за обычный автоматический результат.
+        for candidate in candidates:
+            candidate.source = MatchSource.MANUAL
+
+        dated = [
+            candidate for candidate in candidates if candidate.certificate.expiry_date is not None
+        ]
+        dated.sort(
+            key=lambda candidate: abs((candidate.certificate.expiry_date - batch_expiry).days)  # type: ignore[operator]
+        )
+        return dated[:limit]
+
+    def _alias_expiry_alternatives(
+        self, row: OrderRow, context: ScoringContext
+    ) -> list[MatchCandidate] | None:
+        """Кандидаты по официальному названию из словаря, без допуска по сроку.
+
+        Вспомогательный метод :meth:`find_expiry_alternatives`. Возвращает
+        ``None``, если для товара нет записи в словаре — тогда вызывающая
+        сторона переходит к обычному конвейеру (нечёткий/семантический
+        поиск). Пустой список — запись в словаре есть, но строгий поиск по
+        (наименование, объём) не нашёл в базе ни одной строки.
+
+        Args:
+            row: Строка заказа (``row.requested_expiry`` уже установлен
+                вызывающей стороной на дату партии).
+            context: Общий контекст оценки.
+
+        Returns:
+            Кандидаты либо ``None``, если словарь для товара пуст.
+        """
+        if not context.settings.prefer_alias:
+            return None
+        aliases = self._aliases.find_for_text(row.search_text)
+        if not aliases:
+            return None
+
+        alias = aliases[0]
+        normalized_target = alias.normalized_target
+        if not normalized_target:
+            return []
+
+        certificates = self._certificates.find_strict(normalized_target, alias.volume_ml)
+        if context.settings.require_valid_expiry:
+            certificates = [
+                certificate
+                for certificate in certificates
+                if certificate.expiry_date is None
+                or certificate.expiry_date >= context.reference_date
+            ]
+        return [
+            MatchCandidate(
+                certificate=certificate,
+                score=score_candidate(
+                    row, certificate, lexical=1.0, semantic=None, context=context
+                ),
+                source=MatchSource.MANUAL,
+            )
+            for certificate in certificates
+        ]
+
     # ------------------------------------------------------------- этапы
     def _match_by_alias(self, row: OrderRow, context: ScoringContext) -> MatchResult | None:
         """Этап 1: словарь соответствий — абсолютный источник истины.
@@ -431,6 +554,7 @@ class MatchingService:
         *,
         limit: int,
         skip_hard_filter: bool = False,
+        ignore_expiry_tolerance: bool = False,
     ) -> list[MatchCandidate]:
         """Этапы 2–6: сбор, фильтрация и оценка кандидатов."""
         settings = context.settings
@@ -481,7 +605,9 @@ class MatchingService:
         # Этапы 5–6 — оценка объёма и срока, отсев безусловных несоответствий.
         candidates: list[MatchCandidate] = []
         for certificate_id, (certificate, lexical, source) in lexical_scores.items():
-            if not skip_hard_filter and is_hard_mismatch(row, certificate, context):
+            if not skip_hard_filter and is_hard_mismatch(
+                row, certificate, context, ignore_expiry_tolerance=ignore_expiry_tolerance
+            ):
                 continue
             semantic = semantic_scores.get(certificate_id)
             breakdown = score_candidate(

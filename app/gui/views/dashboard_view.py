@@ -27,8 +27,10 @@ from app.gui.widgets.card import SectionCard, StatCard
 from app.gui.widgets.controls import SegmentedFilter, ghost_button, primary_button, secondary_button
 from app.gui.widgets.data_table import Column, DataTable
 from app.gui.widgets.drop_zone import FileDropZone
+from app.gui.widgets.expiry_suggestion_dialog import ExpirySuggestionDialog
 from app.gui.widgets.progress_panel import ProgressPanel
 from app.models.matching import MatchResult, MatchStatus
+from app.services.expiry_resolution_service import ExpirySuggestion, ManualExpiryReview
 from app.services.order_processing_service import ProcessingOutcome, ProcessingRequest
 
 _LOGGER = logging.getLogger(__name__)
@@ -386,6 +388,7 @@ class DashboardView(BaseView):
             request = ProcessingRequest(
                 order_path=order_path,
                 resolve_ambiguities=self._resolve_ambiguity,
+                resolve_expiry_manually=self._resolve_expiry_manually,
                 learn_from_choices=True,
             )
             return container.order_service.process(request, reporter=reporter)
@@ -482,6 +485,59 @@ class DashboardView(BaseView):
             result.note = "Выбор не сохранён в псевдонимы"
             result.alias_applied = True
         return int(value)
+
+    def _resolve_expiry_manually(
+        self, review: ManualExpiryReview, remaining: int
+    ) -> dict[int, ExpirySuggestion] | None:
+        """Показывает окно ручного подтверждения партий и ждёт решения пользователя.
+
+        Тот же приём, что и в :meth:`_resolve_ambiguity` (метод вызывается
+        из фонового потока обработки заказа — окно должно быть создано в
+        главном потоке, поток обработки блокируется на событии до ответа).
+        Выбор пользователя ни при каких обстоятельствах не создаёт и не
+        изменяет запись в словаре товаров — это отдельное подтверждение
+        конкретного сертификата для конкретной партии, а не соответствие
+        «наименование → товар».
+
+        Args:
+            review: Обзор партий срока годности с предложенными вариантами.
+            remaining: Сколько позиций ещё предстоит разобрать после текущей.
+
+        Returns:
+            Словарь «индекс партии → подтверждённый вариант», пустой словарь
+            (ничего не подтверждено для этой строки) либо ``None``, чтобы
+            прекратить разбор оставшихся позиций.
+        """
+        answer: dict[str, Any] = {}
+        finished = threading.Event()
+
+        def _ask() -> None:
+            try:
+                dialog = ExpirySuggestionDialog(
+                    self.app,
+                    self.theme,
+                    review=review,
+                    tolerance_days=self.app.settings.matching.expiry_tolerance_days,
+                    animator=self.app.animator,
+                    remaining=remaining,
+                )
+                answer["value"] = dialog.wait_result()
+            except Exception:
+                _LOGGER.exception("Ошибка окна ручного подтверждения срока годности")
+                answer["value"] = {}
+            finally:
+                finished.set()
+
+        try:
+            self.app.after(0, _ask)
+        except Exception:
+            return None
+
+        finished.wait()
+        value = answer.get("value")
+        if value == "stop" or value is None:
+            return None
+        return dict(value)
 
     def _search_candidates(self, query: str) -> list[Any]:
         """Ищет кандидатов для уточняющего запроса из окна выбора."""

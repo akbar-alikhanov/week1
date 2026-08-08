@@ -870,6 +870,203 @@ class TestFindCandidates:
         assert "150" in numbers
 
 
+class TestFindExpiryAlternatives:
+    """Проверки поиска ближайших по сроку вариантов (ручной, второй этап подбора).
+
+    ``find_expiry_alternatives`` вызывается только после того, как строгий
+    поиск (с допуском ``expiry_tolerance_days``) уже не нашёл ничего для
+    партии — поэтому здесь проверяется противоположное строгому подбору
+    поведение: кандидаты за пределами допуска ДОЛЖНЫ возвращаться, а не
+    отбраковываться.
+    """
+
+    def test_returns_candidates_beyond_tolerance_sorted_by_distance(
+        self,
+        matching_service: MatchingService,
+        certificate_repository: CertificateProductRepository,
+    ) -> None:
+        """Кандидаты за пределами допуска не отбрасываются, а сортируются по близости."""
+        batch_expiry = _NEAR_FUTURE
+        certificate_repository.replace_all(
+            [
+                make_certificate(
+                    "Товар",
+                    volume_ml=100.0,
+                    expiry_date=batch_expiry + dt.timedelta(days=200),
+                    certificate_number="far",
+                ),
+                make_certificate(
+                    "Товар",
+                    volume_ml=100.0,
+                    expiry_date=batch_expiry + dt.timedelta(days=50),
+                    certificate_number="near",
+                ),
+                make_certificate(
+                    "Товар",
+                    volume_ml=100.0,
+                    expiry_date=batch_expiry + dt.timedelta(days=100),
+                    certificate_number="middle",
+                ),
+            ]
+        )
+
+        row = OrderRow(row_number=1, product_name="Товар 100 мл")
+        alternatives = matching_service.find_expiry_alternatives(row, batch_expiry, limit=10)
+
+        assert [candidate.certificate.certificate_number for candidate in alternatives] == [
+            "near",
+            "middle",
+            "far",
+        ]
+
+    def test_respects_limit(
+        self,
+        matching_service: MatchingService,
+        certificate_repository: CertificateProductRepository,
+    ) -> None:
+        """Возвращается не больше ``limit`` вариантов — самые близкие по сроку."""
+        batch_expiry = _NEAR_FUTURE
+        certificate_repository.replace_all(
+            [
+                make_certificate(
+                    "Товар",
+                    volume_ml=100.0,
+                    expiry_date=batch_expiry + dt.timedelta(days=offset),
+                    certificate_number=str(offset),
+                )
+                for offset in (50, 100, 150, 200, 250)
+            ]
+        )
+
+        row = OrderRow(row_number=1, product_name="Товар 100 мл")
+        alternatives = matching_service.find_expiry_alternatives(row, batch_expiry, limit=2)
+
+        assert [candidate.certificate.certificate_number for candidate in alternatives] == [
+            "50",
+            "100",
+        ]
+
+    def test_excludes_expired_certificates(
+        self,
+        matching_service: MatchingService,
+        certificate_repository: CertificateProductRepository,
+    ) -> None:
+        """Просроченный сертификат не предлагается, даже если он близок по дате к партии."""
+        certificate_repository.replace_all(
+            [
+                make_certificate(
+                    "Товар", volume_ml=100.0, expiry_date=_PAST, certificate_number="expired"
+                ),
+                make_certificate(
+                    "Товар",
+                    volume_ml=100.0,
+                    expiry_date=_NEAR_FUTURE + dt.timedelta(days=300),
+                    certificate_number="valid",
+                ),
+            ]
+        )
+
+        row = OrderRow(row_number=1, product_name="Товар 100 мл")
+        alternatives = matching_service.find_expiry_alternatives(row, _NEAR_FUTURE, limit=10)
+
+        numbers = [candidate.certificate.certificate_number for candidate in alternatives]
+        assert numbers == ["valid"]
+
+    def test_different_volume_is_not_suggested(
+        self,
+        matching_service: MatchingService,
+        certificate_repository: CertificateProductRepository,
+    ) -> None:
+        """Тот же товар другого объёма не предлагается — объём остаётся строгим."""
+        certificate_repository.replace_all(
+            [
+                make_certificate(
+                    "Товар 150 мл",
+                    volume_ml=150.0,
+                    expiry_date=_NEAR_FUTURE + dt.timedelta(days=300),
+                    certificate_number="wrong-volume",
+                )
+            ]
+        )
+
+        row = OrderRow(row_number=1, product_name="Товар 100 мл")
+        alternatives = matching_service.find_expiry_alternatives(row, _NEAR_FUTURE, limit=10)
+
+        assert alternatives == []
+
+    def test_returns_empty_when_nothing_matches_by_name(
+        self,
+        matching_service: MatchingService,
+        certificate_repository: CertificateProductRepository,
+    ) -> None:
+        """Совершенно непохожий товар не даёт вариантов вообще."""
+        certificate_repository.replace_all(
+            [
+                make_certificate(
+                    "Шампунь дегтярный",
+                    volume_ml=250.0,
+                    expiry_date=_NEAR_FUTURE + dt.timedelta(days=300),
+                )
+            ]
+        )
+
+        row = OrderRow(row_number=1, product_name="Крем детский 100 мл")
+        alternatives = matching_service.find_expiry_alternatives(row, _NEAR_FUTURE, limit=10)
+
+        assert alternatives == []
+
+    def test_uses_alias_official_name_when_present(
+        self,
+        matching_service: MatchingService,
+        certificate_repository: CertificateProductRepository,
+        alias_repository: AliasRepository,
+    ) -> None:
+        """При наличии псевдонима ищется официальное название из словаря, не текст заказа."""
+        certificate_repository.replace_all(
+            [
+                make_certificate(
+                    "Лечебные травы 100 мл",
+                    volume_ml=100.0,
+                    expiry_date=_NEAR_FUTURE + dt.timedelta(days=300),
+                    certificate_number="official",
+                )
+            ]
+        )
+        alias_repository.save(
+            Alias(
+                source_text="TP Herbal 100ml",
+                target_name="Лечебные травы 100 мл",
+                volume_ml=100.0,
+            )
+        )
+
+        row = OrderRow(row_number=1, product_name="TP Herbal 100ml")
+        alternatives = matching_service.find_expiry_alternatives(row, _NEAR_FUTURE, limit=10)
+
+        numbers = [candidate.certificate.certificate_number for candidate in alternatives]
+        assert numbers == ["official"]
+
+    def test_does_not_mutate_row_requested_expiry(
+        self,
+        matching_service: MatchingService,
+        certificate_repository: CertificateProductRepository,
+    ) -> None:
+        """Строка заказа возвращается в исходное состояние после пробного поиска.
+
+        ``ExpiryResolutionService`` вызывает этот метод по очереди для
+        каждой партии одного и того же объекта строки — временная мутация
+        не должна «протечь» в следующий вызов или в остальной конвейер.
+        """
+        certificate_repository.replace_all(
+            [make_certificate("Товар", volume_ml=100.0, expiry_date=_NEAR_FUTURE)]
+        )
+
+        row = OrderRow(row_number=1, product_name="Товар 100 мл", requested_expiry=None)
+        matching_service.find_expiry_alternatives(row, _NEAR_FUTURE, limit=10)
+
+        assert row.requested_expiry is None
+
+
 class TestInvalidate:
     """Проверки инвалидации индексов подбора."""
 

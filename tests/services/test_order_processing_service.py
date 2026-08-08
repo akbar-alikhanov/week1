@@ -23,7 +23,7 @@ from app.ai.vector_index import VectorIndex  # noqa: E402
 from app.config.settings import SettingsService  # noqa: E402
 from app.core.events import EventBus  # noqa: E402
 from app.database.connection import Database  # noqa: E402
-from app.models.matching import MatchResult, MatchStatus  # noqa: E402
+from app.models.matching import MatchResult, MatchSource, MatchStatus  # noqa: E402
 from app.parsers.excel_order_parser import ExcelOrderParser  # noqa: E402
 from app.repositories.alias_repository import AliasRepository  # noqa: E402
 from app.repositories.certificate_product_repository import (  # noqa: E402
@@ -33,7 +33,11 @@ from app.repositories.expiry_stock_repository import ExpiryStockRepository  # no
 from app.repositories.history_repository import HistoryRepository  # noqa: E402
 from app.repositories.product_repository import ProductRepository  # noqa: E402
 from app.services.alias_service import AliasService  # noqa: E402
-from app.services.expiry_resolution_service import ExpiryResolutionService  # noqa: E402
+from app.services.expiry_resolution_service import (  # noqa: E402
+    ExpiryResolutionService,
+    ExpirySuggestion,
+    ManualExpiryReview,
+)
 from app.services.matching_service import MatchingService  # noqa: E402
 from app.services.order_processing_service import (  # noqa: E402
     OrderProcessingService,
@@ -163,7 +167,7 @@ def order_service_with_expiry(
     backend = EmbeddingBackend(enabled=False)
     vector_index = VectorIndex(backend, None)
     matching = MatchingService(certificates, aliases, settings_service, backend, vector_index)
-    expiry_resolution = ExpiryResolutionService(expiry_stock, matching)
+    expiry_resolution = ExpiryResolutionService(expiry_stock, matching, settings_service)
 
     service = OrderProcessingService(
         matching,
@@ -676,3 +680,215 @@ class TestBatchCombinationIntegration:
         assert result.expiry_not_in_database is False
         assert result.expiry_no_certificate_available is False
         assert "Недостаточно остатка" in result.note
+
+
+class TestManualExpiryReviewIntegration:
+    """Проверки интеграции ручного (Этап 3) режима подтверждения срока годности.
+
+    Как и ``TestExpiryResolutionIntegration`` выше — не отдельный алгоритм в
+    изоляции (см. ``tests/services/test_expiry_resolution_service.py``), а
+    то, что весь сценарий «выбрать заказ → нажать кнопку» корректно
+    подключает Этап 3: без резолвера поведение не отличается от того, что
+    было бы без этого этапа вообще, а с резолвером подтверждённый вручную
+    сертификат доходит до итогового Excel.
+    """
+
+    def test_without_resolver_behaves_as_if_stage_did_not_exist(
+        self,
+        order_service_with_expiry: tuple[
+            OrderProcessingService, ExpiryStockRepository, CertificateProductRepository
+        ],
+        tmp_path: Path,
+    ) -> None:
+        """Без ``resolve_expiry_manually`` — обычное исключение «нет сертификата»."""
+        service, expiry_stock, certificates = order_service_with_expiry
+        batch_date = dt.date(2029, 6, 1)
+        certificates.replace_all(
+            [
+                make_certificate(
+                    "Крем детский 100 мл",
+                    expiry_date=batch_date + dt.timedelta(days=100),
+                    certificate_number="UZ.1",
+                )
+            ]
+        )
+        expiry_stock.replace_all(
+            [make_expiry_entry("Крем детский 100 мл", expiry_date=batch_date, quantity=100)]
+        )
+
+        order_path = tmp_path / "Заказ.xlsx"
+        _build_order_file_with_expiry_column(order_path, [("Крем детский 100 мл", 10)])
+
+        outcome = service.process(ProcessingRequest(order_path=order_path))
+
+        result = outcome.results[0]
+        assert result.status is MatchStatus.NOT_FOUND
+        assert result.expiry_no_certificate_available is True
+        assert result.certificate is None
+
+    def test_resolver_confirmation_is_written_to_output(
+        self,
+        order_service_with_expiry: tuple[
+            OrderProcessingService, ExpiryStockRepository, CertificateProductRepository
+        ],
+        tmp_path: Path,
+    ) -> None:
+        """Подтверждённый пользователем вариант доходит до итогового Excel как MANUAL."""
+        service, expiry_stock, certificates = order_service_with_expiry
+        batch_date = dt.date(2029, 6, 1)
+        certificates.replace_all(
+            [
+                make_certificate(
+                    "Крем детский 100 мл",
+                    expiry_date=batch_date + dt.timedelta(days=100),
+                    certificate_number="UZ.1",
+                )
+            ]
+        )
+        expiry_stock.replace_all(
+            [make_expiry_entry("Крем детский 100 мл", expiry_date=batch_date, quantity=100)]
+        )
+
+        def _confirm_first(
+            review: ManualExpiryReview, _remaining: int
+        ) -> dict[int, ExpirySuggestion]:
+            return {0: review.batches[0].suggestions[0]}
+
+        order_path = tmp_path / "Заказ.xlsx"
+        _build_order_file_with_expiry_column(order_path, [("Крем детский 100 мл", 10)])
+
+        outcome = service.process(
+            ProcessingRequest(order_path=order_path, resolve_expiry_manually=_confirm_first)
+        )
+
+        result = outcome.results[0]
+        assert result.status is MatchStatus.MANUAL
+        assert result.certificate is not None
+        assert result.certificate.certificate_number == "UZ.1"
+        assert len(result.batch_allocations) == 1
+        assert result.batch_allocations[0].candidate.source is MatchSource.MANUAL
+
+        workbook = openpyxl.load_workbook(outcome.output_file)
+        sheet = workbook["Заказ"]
+        assert sheet.cell(row=2, column=5).value == "UZ.1"
+        workbook.close()
+
+    def test_resolver_returning_none_stops_remaining_rows(
+        self,
+        order_service_with_expiry: tuple[
+            OrderProcessingService, ExpiryStockRepository, CertificateProductRepository
+        ],
+        tmp_path: Path,
+    ) -> None:
+        """Отказ пользователя разбирать дальше оставляет остальные строки неподтверждёнными."""
+        service, expiry_stock, certificates = order_service_with_expiry
+        batch_date = dt.date(2029, 6, 1)
+        certificates.replace_all(
+            [
+                make_certificate(
+                    "Крем детский 100 мл",
+                    expiry_date=batch_date + dt.timedelta(days=100),
+                    certificate_number="UZ.1",
+                ),
+                make_certificate(
+                    "Масло облепиховое 100 мл",
+                    expiry_date=batch_date + dt.timedelta(days=100),
+                    certificate_number="UZ.2",
+                ),
+            ]
+        )
+        expiry_stock.replace_all(
+            [
+                make_expiry_entry("Крем детский 100 мл", expiry_date=batch_date, quantity=100),
+                make_expiry_entry("Масло облепиховое 100 мл", expiry_date=batch_date, quantity=100),
+            ]
+        )
+
+        calls: list[str] = []
+
+        def _stop_immediately(
+            review: ManualExpiryReview, _remaining: int
+        ) -> dict[int, ExpirySuggestion] | None:
+            calls.append(review.row.product_name)
+            return None
+
+        order_path = tmp_path / "Заказ.xlsx"
+        _build_order_file_with_expiry_column(
+            order_path, [("Крем детский 100 мл", 10), ("Масло облепиховое 100 мл", 10)]
+        )
+
+        outcome = service.process(
+            ProcessingRequest(order_path=order_path, resolve_expiry_manually=_stop_immediately)
+        )
+
+        assert len(calls) == 1  # резолвер вызван один раз — дальше цикл остановлен
+        for result in outcome.results:
+            assert result.status is MatchStatus.NOT_FOUND
+            assert result.expiry_no_certificate_available is True
+
+    def test_manual_confirmation_does_not_create_alias(
+        self, tmp_path: Path, database: Database
+    ) -> None:
+        """Подтверждение конкретного сертификата не создаёт запись в словаре товаров."""
+        certificates = CertificateProductRepository(database)
+        aliases = AliasRepository(database)
+        products = ProductRepository(database)
+        history = HistoryRepository(database)
+        expiry_stock = ExpiryStockRepository(database)
+        settings_service = SettingsService(tmp_path / "settings.json")
+        settings_service.load()
+        settings_service.update(
+            lambda settings: setattr(settings.export, "output_dir", str(tmp_path / "output"))
+        )
+        settings_service.update(lambda settings: setattr(settings.export, "write_report", False))
+
+        backend = EmbeddingBackend(enabled=False)
+        vector_index = VectorIndex(backend, None)
+        matching = MatchingService(certificates, aliases, settings_service, backend, vector_index)
+        alias_service = AliasService(aliases, certificates, matching, EventBus())
+        expiry_resolution = ExpiryResolutionService(expiry_stock, matching, settings_service)
+
+        service = OrderProcessingService(
+            matching,
+            ExcelOrderParser(),
+            history,
+            products,
+            ReportService(),
+            settings_service,
+            EventBus(),
+            alias_service=alias_service,
+            expiry_resolution_service=expiry_resolution,
+        )
+
+        batch_date = dt.date(2029, 6, 1)
+        certificates.replace_all(
+            [
+                make_certificate(
+                    "Крем детский 100 мл",
+                    expiry_date=batch_date + dt.timedelta(days=100),
+                    certificate_number="UZ.1",
+                )
+            ]
+        )
+        expiry_stock.replace_all(
+            [make_expiry_entry("Крем детский 100 мл", expiry_date=batch_date, quantity=100)]
+        )
+
+        def _confirm_first(
+            review: ManualExpiryReview, _remaining: int
+        ) -> dict[int, ExpirySuggestion]:
+            return {0: review.batches[0].suggestions[0]}
+
+        order_path = tmp_path / "Заказ.xlsx"
+        _build_order_file_with_expiry_column(order_path, [("Крем детский 100 мл", 10)])
+
+        outcome = service.process(
+            ProcessingRequest(
+                order_path=order_path,
+                resolve_expiry_manually=_confirm_first,
+                learn_from_choices=True,
+            )
+        )
+
+        assert outcome.results[0].status is MatchStatus.MANUAL
+        assert aliases.find_for_text("Крем детский 100 мл") == []

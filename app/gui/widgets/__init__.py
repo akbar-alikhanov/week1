@@ -22,6 +22,7 @@ from app.gui.widgets.dialogs import (
     show_message,
 )
 from app.gui.widgets.drop_zone import FileDropZone
+from app.gui.widgets.expiry_suggestion_dialog import ExpirySuggestionDialog
 from app.gui.widgets.pdf_viewer import PdfViewer
 from app.gui.widgets.progress_panel import ProgressPanel
 from app.gui.widgets.search_entry import SearchEntry
@@ -38,6 +39,7 @@ __all__ = [
     "ConfirmDialog",
     "DataTable",
     "EmptyState",
+    "ExpirySuggestionDialog",
     "FileDropZone",
     "MessageDialog",
     "ModalDialog",

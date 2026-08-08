@@ -140,7 +140,11 @@ def score_candidate(
 
 
 def is_hard_mismatch(
-    row: OrderRow, certificate: CertificateProduct, context: ScoringContext
+    row: OrderRow,
+    certificate: CertificateProduct,
+    context: ScoringContext,
+    *,
+    ignore_expiry_tolerance: bool = False,
 ) -> bool:
     """Проверяет наличие безусловного несоответствия.
 
@@ -155,6 +159,15 @@ def is_hard_mismatch(
         row: Строка заказа.
         certificate: Сертификат-кандидат.
         context: Общий контекст оценки.
+        ignore_expiry_tolerance: Не отбраковывать по расхождению срока.
+            Используется ИСКЛЮЧИТЕЛЬНО ручным (вторым) этапом подбора срока
+            годности
+            (:meth:`~app.services.matching_service.MatchingService.find_expiry_alternatives`)
+            для поиска ближайших вариантов ПОСЛЕ того, как обычный строгий
+            подбор уже не нашёл ничего в пределах допуска — результат такого
+            поиска никогда не выбирается автоматически, только предлагается
+            пользователю. Остальные проверки (просрочка, объём) действуют
+            как обычно.
 
     Returns:
         ``True``, если кандидат должен быть отброшен независимо от оценки.
@@ -169,7 +182,8 @@ def is_hard_mismatch(
         return True
 
     if (
-        row.requested_expiry is not None
+        not ignore_expiry_tolerance
+        and row.requested_expiry is not None
         and certificate.expiry_date is not None
         and abs((certificate.expiry_date - row.requested_expiry).days)
         > settings.expiry_tolerance_days

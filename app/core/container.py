@@ -359,7 +359,9 @@ class ApplicationContainer:
 
     def _create_expiry_resolution_service(self) -> ExpiryResolutionService:
         """Создаёт сервис подбора срока годности (этап до поиска сертификата)."""
-        return ExpiryResolutionService(self.expiry_stock_repository, self.matching_service)
+        return ExpiryResolutionService(
+            self.expiry_stock_repository, self.matching_service, self.settings_service
+        )
 
     def _create_alias_service(self) -> AliasService:
         """Создаёт сервис псевдонимов."""

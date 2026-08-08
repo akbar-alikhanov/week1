@@ -162,3 +162,42 @@ class TestExpiryToleranceHardCutoff:
         row = OrderRow(row_number=1, product_name="Товар", requested_expiry=dt.date(2028, 6, 1))
         certificate = make_certificate("Товар", expiry_date=dt.date(2027, 6, 1))
         assert is_hard_mismatch(row, certificate, _context())
+
+
+class TestIgnoreExpiryTolerance:
+    """Проверки ``ignore_expiry_tolerance`` — второй (ручной) этап подбора срока.
+
+    Флаг снимает ТОЛЬКО проверку допуска по сроку; остальные безусловные
+    проверки (просрочка, объём) продолжают действовать как обычно — второй
+    этап ищет «тот же товар, тот же объём», а не «что угодно с любым сроком».
+    """
+
+    def test_beyond_tolerance_is_not_a_hard_mismatch_when_ignored(self) -> None:
+        """С флагом кандидат за пределами допуска больше не отбраковывается."""
+        row = OrderRow(row_number=1, product_name="Товар", requested_expiry=dt.date(2026, 6, 1))
+        certificate = make_certificate("Товар", expiry_date=dt.date(2027, 6, 1))
+        assert not is_hard_mismatch(row, certificate, _context(), ignore_expiry_tolerance=True)
+
+    def test_default_still_rejects_beyond_tolerance(self) -> None:
+        """Без явного флага поведение не меняется — допуск по-прежнему жёсткий."""
+        row = OrderRow(row_number=1, product_name="Товар", requested_expiry=dt.date(2026, 6, 1))
+        certificate = make_certificate("Товар", expiry_date=dt.date(2027, 6, 1))
+        assert is_hard_mismatch(row, certificate, _context())
+
+    def test_ignoring_tolerance_does_not_allow_expired_certificate(self) -> None:
+        """Флаг не отменяет отбраковку просроченного сертификата."""
+        row = OrderRow(row_number=1, product_name="Товар", requested_expiry=dt.date(2026, 6, 1))
+        certificate = make_certificate("Товар", expiry_date=dt.date(2020, 1, 1))
+        assert is_hard_mismatch(
+            row, certificate, _context(require_valid_expiry=True), ignore_expiry_tolerance=True
+        )
+
+    def test_ignoring_tolerance_does_not_allow_different_volume_dimension(self) -> None:
+        """Флаг не отменяет отбраковку по несовместимой размерности объёма."""
+        row = OrderRow(
+            row_number=1,
+            product_name="Товар 100 мл",
+            requested_expiry=dt.date(2026, 6, 1),
+        )
+        certificate = make_certificate("Товар 30 шт", expiry_date=dt.date(2027, 6, 1))
+        assert is_hard_mismatch(row, certificate, _context(), ignore_expiry_tolerance=True)
