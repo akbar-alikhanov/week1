@@ -364,6 +364,50 @@ class TestCombinationOfMultipleBatches:
         assert excluded[1].not_in_database is False
         assert excluded[1].no_certificate_available is False
 
+    def test_combination_excludes_batch_whose_only_certificate_is_beyond_tolerance(
+        self,
+        expiry_resolution_service: ExpiryResolutionService,
+        expiry_stock_repository: ExpiryStockRepository,
+        certificate_repository: CertificateProductRepository,
+    ) -> None:
+        """Партия «имеет сертификат» только если он проходит тот же строгий
+        допуск по сроку, что и обычный подбор (регрессия к отчёту
+        пользователя: раньше при подборе для партии брался просто ближайший
+        сертификат без проверки допуска).
+
+        Обе партии физически достаточны для заказа (600 + 600 >= 1000), но
+        сертификат второй партии отстоит от ЕЁ даты на 46 дней — на день
+        больше допуска по умолчанию (45). Такая партия должна считаться не
+        имеющей сертификата вообще, и тогда одной первой партии (600) не
+        хватает на заказ в 1000 штук.
+        """
+        first_date = dt.date(2029, 1, 1)
+        second_date = dt.date(2027, 1, 1)
+        certificate_repository.replace_all(
+            [
+                make_certificate(_PRODUCT, expiry_date=first_date, certificate_number="UZ.1"),
+                make_certificate(
+                    _PRODUCT,
+                    expiry_date=second_date + dt.timedelta(days=46),
+                    certificate_number="UZ.2",
+                ),
+            ]
+        )
+        expiry_stock_repository.replace_all(
+            [
+                make_expiry_entry(_PRODUCT, expiry_date=first_date, quantity=600),
+                make_expiry_entry(_PRODUCT, expiry_date=second_date, quantity=600),
+            ]
+        )
+
+        row = _row(1, quantity=1000)
+        excluded, combined = expiry_resolution_service.resolve_rows([row])
+
+        assert combined == {}
+        assert excluded == {
+            1: ExpiryExclusion(note="Недостаточно остатка по партиям с подходящими сертификатами.")
+        }
+
     def test_prefers_fewest_and_freshest_batches(
         self,
         expiry_resolution_service: ExpiryResolutionService,

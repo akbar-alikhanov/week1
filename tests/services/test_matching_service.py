@@ -251,6 +251,12 @@ class TestAliasStage:
         дают статус AMBIGUOUS. Здесь наименование и объём уже подтверждены
         точным совпадением, поэтому несколько строк той же строгой группы
         не приводят к неоднозначности — решает только ближайший срок.
+
+        «Далёкий» сертификат намеренно взят в пределах допуска по сроку
+        (иначе после исправления жёсткого допуска он был бы попросту
+        исключён из кандидатов, и тест перестал бы проверять выбор МЕЖДУ
+        несколькими подходящими вариантами) — но дальше от требуемой даты,
+        чем «близкий».
         """
         near = make_certificate(
             "Лечебные травы 100 мл",
@@ -259,7 +265,10 @@ class TestAliasStage:
             certificate_number="near",
         )
         far = make_certificate(
-            "Лечебные травы 100 мл", volume_ml=100.0, expiry_date=_FUTURE, certificate_number="far"
+            "Лечебные травы 100 мл",
+            volume_ml=100.0,
+            expiry_date=_NEAR_FUTURE + dt.timedelta(days=30),
+            certificate_number="far",
         )
         certificate_repository.replace_all([near, far])
         alias_repository.save(
@@ -273,6 +282,44 @@ class TestAliasStage:
         assert result.status is MatchStatus.MATCHED
         assert result.certificate is not None
         assert result.certificate.certificate_number == "near"
+
+    def test_alias_does_not_select_the_only_candidate_when_it_is_beyond_tolerance(
+        self,
+        matching_service: MatchingService,
+        certificate_repository: CertificateProductRepository,
+        alias_repository: AliasRepository,
+    ) -> None:
+        """Регрессия к отчёту пользователя: словарный этап не выбирает
+        сертификат за пределами допуска по сроку, даже если это единственная
+        строка базы, найденная строгим поиском по наименованию и объёму.
+
+        Раньше здесь ``_closest_by_expiry`` просто брал единственного
+        найденного кандидата, не проверяя допуск: сертификат с расхождением
+        в сотни дней мог быть выбран только потому, что он один. Теперь он
+        исключается ДО выбора ближайшего, словарный этап отступает к
+        резервному поиску (:meth:`_fallback_after_stale_alias`), а тот тоже
+        ничего не находит — текст заказа на латинице не совпадает по
+        наименованию с товаром на кириллице без семантической модели
+        (отключена в тестовом стенде).
+        """
+        only = make_certificate(
+            "Лечебные травы 100 мл",
+            volume_ml=100.0,
+            expiry_date=_NEAR_FUTURE + dt.timedelta(days=200),
+            certificate_number="too-far",
+        )
+        certificate_repository.replace_all([only])
+        alias_repository.save(
+            Alias(source_text="TP Herbal 100ml", target_name=only.product_name, volume_ml=100.0)
+        )
+
+        result = matching_service.match_row(
+            OrderRow(row_number=1, product_name="TP Herbal 100ml", requested_expiry=_NEAR_FUTURE)
+        )
+
+        assert result.status is MatchStatus.NOT_FOUND
+        assert result.alias_stale
+        assert not result.alias_applied
 
     def test_alias_fefo_without_requested_expiry(
         self,
@@ -657,6 +704,84 @@ class TestLexicalStage:
             [make_certificate("Товар", volume_ml=100.0, expiry_date=_PAST)]
         )
         result = matching_service.match_row(OrderRow(row_number=1, product_name="Товар 100 мл"))
+        assert result.status is MatchStatus.NOT_FOUND
+
+    def test_certificate_beyond_tolerance_excluded_leaving_only_the_valid_one(
+        self,
+        matching_service: MatchingService,
+        certificate_repository: CertificateProductRepository,
+    ) -> None:
+        """Из нескольких строк базы для одного товара выбирается только та,
+        что укладывается в допуск по сроку — вторая не становится
+        кандидатом вообще, а не просто уступает в оценке.
+        """
+        requested = _NEAR_FUTURE
+        certificate_repository.replace_all(
+            [
+                make_certificate(
+                    "Лечебные травы, сироп 100 мл",
+                    volume_ml=100.0,
+                    expiry_date=requested + dt.timedelta(days=10),
+                    certificate_number="within",
+                ),
+                make_certificate(
+                    "Лечебные травы, сироп 100 мл",
+                    volume_ml=100.0,
+                    expiry_date=requested + dt.timedelta(days=200),
+                    certificate_number="beyond",
+                ),
+            ]
+        )
+
+        result = matching_service.match_row(
+            OrderRow(
+                row_number=1,
+                product_name="Лечебные травы, сироп 100 мл",
+                requested_expiry=requested,
+            )
+        )
+
+        assert result.status is MatchStatus.MATCHED
+        assert result.certificate is not None
+        assert result.certificate.certificate_number == "within"
+        assert all(
+            candidate.certificate.certificate_number != "beyond" for candidate in result.candidates
+        )
+
+    def test_all_certificates_beyond_tolerance_result_in_not_found(
+        self,
+        matching_service: MatchingService,
+        certificate_repository: CertificateProductRepository,
+    ) -> None:
+        """Если ни одна строка базы не укладывается в допуск по сроку — NOT_FOUND,
+        а не выбор «наименее неподходящего» варианта.
+        """
+        requested = _NEAR_FUTURE
+        certificate_repository.replace_all(
+            [
+                make_certificate(
+                    "Лечебные травы, сироп 100 мл",
+                    volume_ml=100.0,
+                    expiry_date=requested + dt.timedelta(days=200),
+                    certificate_number="too-late",
+                ),
+                make_certificate(
+                    "Лечебные травы, сироп 100 мл",
+                    volume_ml=100.0,
+                    expiry_date=requested - dt.timedelta(days=200),
+                    certificate_number="too-early",
+                ),
+            ]
+        )
+
+        result = matching_service.match_row(
+            OrderRow(
+                row_number=1,
+                product_name="Лечебные травы, сироп 100 мл",
+                requested_expiry=requested,
+            )
+        )
+
         assert result.status is MatchStatus.NOT_FOUND
 
     def test_empty_row_is_skipped(self, matching_service: MatchingService) -> None:

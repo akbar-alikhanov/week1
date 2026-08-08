@@ -145,8 +145,11 @@ def is_hard_mismatch(
     """Проверяет наличие безусловного несоответствия.
 
     Некоторые расхождения не компенсируются никакими весами: сертификат с
-    истёкшим сроком нельзя приложить к поставке, а объём 100 мл нельзя
-    подтвердить сертификатом на 500 мл, каким бы похожим ни было название.
+    истёкшим сроком нельзя приложить к поставке, объём 100 мл нельзя
+    подтвердить сертификатом на 500 мл, а если в заказе указан требуемый
+    срок годности — сертификат, чей срок отличается от него больше чем на
+    ``expiry_tolerance_days`` (в любую сторону, с учётом года), не может
+    быть кандидатом вообще, каким бы похожим ни было название.
 
     Args:
         row: Строка заказа.
@@ -162,6 +165,14 @@ def is_hard_mismatch(
         settings.require_valid_expiry
         and certificate.expiry_date is not None
         and certificate.expiry_date < context.reference_date
+    ):
+        return True
+
+    if (
+        row.requested_expiry is not None
+        and certificate.expiry_date is not None
+        and abs((certificate.expiry_date - row.requested_expiry).days)
+        > settings.expiry_tolerance_days
     ):
         return True
 

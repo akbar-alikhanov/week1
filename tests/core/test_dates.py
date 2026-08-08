@@ -179,12 +179,12 @@ class TestExpirySimilarity:
         )
         assert score == pytest.approx(1.0)
 
-    def test_far_from_requested_scores_low_but_not_zero(self) -> None:
-        """Большое расхождение с требуемым сроком сильно снижает оценку, но не до нуля.
+    def test_far_from_requested_scores_zero(self) -> None:
+        """Расхождение с требуемым сроком за пределами допуска даёт строгий ноль.
 
-        Не обнуляем намеренно: если ни один сертификат не попал в окно
-        допуска, подбор должен уметь выбрать «ближайший подходящий» вариант
-        среди кандидатов, а не увидеть у всех одинаковый ноль.
+        Сертификат вне окна допуска — не «менее подходящий», а не кандидат
+        вообще: понижать, но не обнулять оценку означало бы, что при
+        достаточно широких весах он всё равно может быть выбран.
         """
         score = expiry_similarity(
             dt.date(2029, 1, 1),
@@ -192,7 +192,7 @@ class TestExpirySimilarity:
             reference=dt.date(2025, 1, 1),
             tolerance_days=180,
         )
-        assert 0.0 < score < 0.3
+        assert score == pytest.approx(0.0)
 
     def test_within_tolerance_window_scores_high(self) -> None:
         """Срок в пределах окна допуска получает высокую, но не максимальную оценку."""
@@ -221,23 +221,31 @@ class TestExpirySimilarity:
         assert before == pytest.approx(0.85)
         assert after == pytest.approx(0.85)
 
-    def test_score_never_reaches_zero_for_a_valid_certificate(self) -> None:
-        """Даже огромное расхождение не обнуляет оценку действующего сертификата."""
+    def test_score_reaches_zero_beyond_tolerance_even_for_a_valid_certificate(self) -> None:
+        """Действующий (не просроченный) сертификат тоже обнуляется, если срок далёк.
+
+        «Валидный» и «подходящий по запрошенному сроку» — разные вещи:
+        сертификат из 2099 года не просрочен, но если заказ просит срок из
+        2026-го с допуском ±45 дней, разница в десятки лет не должна
+        оставлять кандидату положительную оценку.
+        """
         score = expiry_similarity(
             dt.date(2099, 1, 1),
             dt.date(2026, 6, 1),
             reference=dt.date(2025, 1, 1),
             tolerance_days=45,
         )
-        assert score > 0.0
+        assert score == pytest.approx(0.0)
 
-    def test_closer_out_of_window_certificate_still_ranks_higher(self) -> None:
-        """За пределами окна допуска более близкий срок всё равно оценивается выше.
+    def test_both_out_of_window_certificates_score_zero(self) -> None:
+        """За пределами окна допуска оценка нулевая независимо от близости даты.
 
-        Прямая проверка требования «если в пределах ±45 дней ничего не
-        нашлось — предложить сертификаты с наиболее близким сроком»: чтобы
-        подбор мог ранжировать кандидатов по близости, их оценки не должны
-        совпадать (что происходило бы при жёстком обнулении за окном).
+        Раньше здесь проверялось, что более близкий к запрошенному сроку
+        сертификат вне окна допуска всё равно ранжируется выше более
+        далёкого — так подбор мог бы предложить «наименее плохой» вариант.
+        Это прямо противоречит требованию: сертификат за пределами допуска
+        не кандидат вообще, поэтому обе оценки теперь строго нулевые и
+        неразличимы между собой.
         """
         requested = dt.date(2026, 6, 1)
         closer = expiry_similarity(
@@ -252,10 +260,11 @@ class TestExpirySimilarity:
             reference=dt.date(2025, 1, 1),
             tolerance_days=45,
         )
-        assert closer > farther > 0.0
+        assert closer == pytest.approx(0.0)
+        assert farther == pytest.approx(0.0)
 
     def test_score_is_monotonic_in_distance(self) -> None:
-        """Оценка убывает монотонно с ростом расхождения — окно и «хвост» без разрывов."""
+        """Оценка не возрастает с расхождением: внутри окна — плавно, на границе — обрыв в ноль."""
         requested = dt.date(2026, 6, 1)
         scores = [
             expiry_similarity(

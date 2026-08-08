@@ -112,3 +112,53 @@ class TestIsHardMismatch:
         row = OrderRow(row_number=1, product_name="Товар")
         certificate = make_certificate("Товар")
         assert not is_hard_mismatch(row, certificate, _context())
+
+
+class TestExpiryToleranceHardCutoff:
+    """Проверки безусловного исключения по допуску срока годности.
+
+    Если в заказе указан требуемый срок, сертификат за пределами
+    ``expiry_tolerance_days`` — не кандидат с пониженной оценкой, а
+    отбракованный кандидат, независимо от совпадения наименования и объёма.
+    """
+
+    def test_zero_difference_is_not_a_hard_mismatch(self) -> None:
+        """Точное совпадение срока — кандидат допускается."""
+        row = OrderRow(row_number=1, product_name="Товар", requested_expiry=dt.date(2026, 6, 1))
+        certificate = make_certificate("Товар", expiry_date=dt.date(2026, 6, 1))
+        assert not is_hard_mismatch(row, certificate, _context())
+
+    def test_thirty_days_difference_is_not_a_hard_mismatch(self) -> None:
+        """Расхождение в 30 дней укладывается в допуск по умолчанию (45 дней)."""
+        row = OrderRow(row_number=1, product_name="Товар", requested_expiry=dt.date(2026, 6, 1))
+        certificate = make_certificate("Товар", expiry_date=dt.date(2026, 7, 1))
+        assert not is_hard_mismatch(row, certificate, _context())
+
+    def test_exact_tolerance_boundary_is_not_a_hard_mismatch(self) -> None:
+        """Расхождение, равное ровно tolerance_days, — граница включительно."""
+        row = OrderRow(row_number=1, product_name="Товар", requested_expiry=dt.date(2026, 6, 1))
+        certificate = make_certificate("Товар", expiry_date=dt.date(2026, 7, 16))  # +45 дней
+        assert not is_hard_mismatch(row, certificate, _context(expiry_tolerance_days=45))
+
+    def test_one_day_beyond_tolerance_is_a_hard_mismatch(self) -> None:
+        """Расхождение в tolerance_days + 1 день уже безусловно отбраковывается."""
+        row = OrderRow(row_number=1, product_name="Товар", requested_expiry=dt.date(2026, 6, 1))
+        certificate = make_certificate("Товар", expiry_date=dt.date(2026, 7, 17))  # +46 дней
+        assert is_hard_mismatch(row, certificate, _context(expiry_tolerance_days=45))
+
+    def test_one_year_difference_is_a_hard_mismatch(self) -> None:
+        """Расхождение в год безусловно отбраковывается, даже день и месяц совпадают."""
+        row = OrderRow(row_number=1, product_name="Товар", requested_expiry=dt.date(2026, 6, 1))
+        certificate = make_certificate("Товар", expiry_date=dt.date(2027, 6, 1))
+        assert is_hard_mismatch(row, certificate, _context())
+
+    def test_same_day_and_month_different_year_is_a_hard_mismatch(self) -> None:
+        """Год обязательно учитывается: совпадение дня и месяца не спасает кандидата.
+
+        Оба срока — «действующие» на опорную дату контекста (не просрочены),
+        поэтому отбраковка объясняется именно допуском по сроку, а не
+        отдельной проверкой ``require_valid_expiry``.
+        """
+        row = OrderRow(row_number=1, product_name="Товар", requested_expiry=dt.date(2028, 6, 1))
+        certificate = make_certificate("Товар", expiry_date=dt.date(2027, 6, 1))
+        assert is_hard_mismatch(row, certificate, _context())
