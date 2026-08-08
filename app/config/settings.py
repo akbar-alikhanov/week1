@@ -208,6 +208,10 @@ class ExportSettings:
             заказа — отдельная, всегда нетронутая колонка исходного файла).
         expiry_column_title: Заголовок колонки со сроком годности
             НАЙДЕННОГО сертификата (создаётся программой).
+        batch_allocation_column_title: Заголовок колонки распределения
+            количества по партиям — заполняется только для строк,
+            выполненных несколькими сроками годности сразу (Этап 2, см.
+            ``ExpiryResolutionService``); для остальных строк остаётся пустой.
         add_score_column: Добавлять ли служебную колонку с оценкой совпадения.
         filename_suffix: Суффикс имени итогового файла.
     """
@@ -226,6 +230,7 @@ class ExportSettings:
     date_format: str = "%d.%m.%Y"
     certificate_column_title: str = "Сертификат"
     expiry_column_title: str = "С.Г. сертификата"
+    batch_allocation_column_title: str = "Распределение количества"
     add_score_column: bool = False
     filename_suffix: str = "_с_сертификатами"
 

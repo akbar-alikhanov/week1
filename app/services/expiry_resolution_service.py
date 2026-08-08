@@ -12,6 +12,14 @@
 сейчас есть на складе и когда у них истекает срок», а не «какой сертификат
 подтверждает товар». Одна и та же строка заказа может встречаться в этой
 базе много раз — по одной записи на партию/срок.
+
+Этап 2 (объединение нескольких партий): если ни одна партия не покрывает
+требуемое количество самостоятельно, разрешается использовать сразу
+несколько партий — но только тех, для которых пробным подбором уже
+подтверждён сертификат. Физический остаток партии без сертификата в расчёт
+доступного количества не входит вообще (доступный остаток такой партии
+считается нулевым), поэтому недостающее количество никогда не «добирается»
+партиями, которые сертификатом не подтверждены.
 """
 
 from __future__ import annotations
@@ -21,9 +29,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 
+from app.core.dates import format_date
 from app.core.events import ProgressReporter
 from app.core.text import normalize
-from app.models.matching import MatchStatus
+from app.models.expiry_stock import ExpiryStockEntry
+from app.models.matching import BatchAllocation, MatchCandidate, MatchStatus
 from app.models.order import OrderRow
 from app.repositories.expiry_stock_repository import ExpiryStockRepository
 from app.services.matching_service import MatchingService
@@ -38,18 +48,42 @@ class ExpiryExclusion:
     Attributes:
         note: Пояснение для пользователя (итоговый Excel, отчёт, история).
         not_in_database: Признак того, что товар отсутствует в базе сроков
-            годности вообще — единственный случай с отдельным визуальным
-            выделением (жёлтая заливка и зачёркнутый текст, п. «Если товар
-            не найден» требования). Второй возможный случай — товар в базе
-            есть, но подходящий срок подобрать не удалось (недостаточно
-            количества на любой отдельной партии, либо ни для одного срока
-            с достаточным количеством не нашёлся сертификат) — получает
-            обычное выделение «не найдено», как и любая другая ненайденная
-            строка, без специального форматирования.
+            годности вообще. Вместе с ``no_certificate_available`` —
+            единственные случаи с отдельным визуальным выделением (жёлтая
+            заливка и зачёркнутый текст, требования п. 12 и п. 13 Этапа 2).
+            Остальные случаи (недостаточно суммарного остатка среди партий
+            с сертификатом) получают обычное выделение «не найдено», как и
+            любая другая ненайденная строка, без специального форматирования.
+        no_certificate_available: Признак того, что товар в базе сроков
+            есть, но ни для одной его партии не подтверждён сертификат —
+            попытка подбора (ни одной, ни нескольких партий) поэтому не
+            имела смысла. Как и ``not_in_database``, требует жёлтой заливки
+            и зачёркнутого текста.
     """
 
     note: str
     not_in_database: bool = False
+    no_certificate_available: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _BatchCheck:
+    """Результат проверки одной партии: остаток, сертификат, доступное количество.
+
+    ``available`` — центральное понятие Этапа 2 (см. докстринг модуля):
+    физический остаток партии засчитывается только тогда, когда для неё
+    подтверждён сертификат, иначе он равен нулю независимо от того, сколько
+    товара физически есть на складе.
+    """
+
+    entry: ExpiryStockEntry
+    candidate: MatchCandidate | None
+    available: float
+
+    @property
+    def has_certificate(self) -> bool:
+        """Признак того, что для партии подтверждён сертификат."""
+        return self.candidate is not None
 
 
 class ExpiryResolutionService:
@@ -79,13 +113,13 @@ class ExpiryResolutionService:
 
     def resolve_rows(
         self, rows: Sequence[OrderRow], *, reporter: ProgressReporter | None = None
-    ) -> dict[int, ExpiryExclusion]:
-        """Подбирает срок годности для каждой строки заказа.
+    ) -> tuple[dict[int, ExpiryExclusion], dict[int, list[BatchAllocation]]]:
+        """Подбирает срок годности (или комбинацию партий) для каждой строки заказа.
 
-        Строкам, для которых подходящий срок найден (или у которых он уже
-        был указан в заказе), метод ничего дополнительно не сообщает —
-        ``row.requested_expiry`` уже мутирован на месте, и дальше строка
-        идёт в обычный, неизменённый подбор сертификата.
+        Строкам, для которых подходящий срок найден одной партией (или у
+        которых он уже был указан в заказе), метод ничего дополнительно не
+        сообщает — ``row.requested_expiry`` уже мутирован на месте, и дальше
+        строка идёт в обычный, неизменённый подбор сертификата.
 
         Args:
             rows: Строки заказа.
@@ -93,54 +127,73 @@ class ExpiryResolutionService:
                 заказах небыстры).
 
         Returns:
-            Отображение «номер строки → причина исключения» для строк,
-            которые не должны передаваться в обычный подбор сертификата.
-            Пустой словарь, если база сроков годности не настроена или все
-            строки успешно прошли этап (или уже имели указанный срок).
+            Пара словарей, оба ключом — номер строки заказа:
+
+            * «строка → причина исключения» для строк, которые не должны
+              передаваться в обычный подбор сертификата вообще (товара нет
+              в базе, ни для одной партии нет сертификата, либо суммарного
+              подтверждённого остатка недостаточно);
+            * «строка → распределение по партиям» для строк, выполненных
+              несколькими сроками годности сразу (Этап 2) — такие строки
+              тоже не должны передаваться в обычный подбор: сертификаты для
+              них уже найдены здесь, по каждой партии отдельно.
+
+            Оба словаря пустые, если база сроков годности не настроена или
+            все строки успешно прошли этап одной партией (или уже имели
+            указанный срок).
         """
         if self._stock.count() == 0:
-            return {}
+            return {}, {}
 
         if reporter is not None:
             reporter.start(len(rows), "Подбор срока годности…", "expiry")
 
         excluded: dict[int, ExpiryExclusion] = {}
+        combined: dict[int, list[BatchAllocation]] = {}
         for index, row in enumerate(rows, start=1):
-            exclusion = self._resolve_row(row)
-            if exclusion is not None:
-                excluded[row.row_number] = exclusion
+            outcome = self._resolve_row(row)
+            if isinstance(outcome, ExpiryExclusion):
+                excluded[row.row_number] = outcome
+            elif isinstance(outcome, list):
+                combined[row.row_number] = outcome
             if reporter is not None:
                 reporter.advance(1, f"Обработано {index} из {len(rows)}", "expiry")
 
         if reporter is not None:
             reporter.finish("Подбор срока годности завершён", "expiry")
-        return excluded
+        return excluded, combined
 
     # ------------------------------------------------------------- строка
-    def _resolve_row(self, row: OrderRow) -> ExpiryExclusion | None:
-        """Определяет срок годности для одной строки заказа.
+    def _resolve_row(self, row: OrderRow) -> ExpiryExclusion | list[BatchAllocation] | None:
+        """Определяет срок годности (или комбинацию партий) для одной строки заказа.
 
         Реализует алгоритм требования пошагово:
 
         1. Найти все партии товара в базе сроков (точное совпадение полного
            системного названия).
         2. Отсортировать от самого нового срока к самому старому.
-        3. Для каждого срока — хватает ли количества партии для заказа;
-           если нет, перейти к следующему (более старому) сроку.
-        4. Если количества достаточно, пробным вызовом существующего
-           ``MatchingService.match_row`` проверить, находится ли сертификат
-           на этот срок. Найден — использовать этот срок и остановиться.
-           Не найден — вернуть срок в исходное состояние и перейти к
-           следующему более старому сроку.
+        3. Для КАЖДОЙ партии по очереди — пробным вызовом существующего
+           ``MatchingService.match_row`` проверить, подтверждается ли для
+           неё сертификат; доступное количество партии равно её остатку,
+           если сертификат подтверждён, и нулю, если нет (см. докстринг
+           модуля). Партия, чьего ОДНОГО доступного количества хватает на
+           весь заказ, используется сразу — Этап 1, поведение не отличается
+           от того, что было до появления Этапа 2.
+        4. Если ни одна партия по отдельности не покрыла заказ — Этап 2:
+           просуммировать доступное количество партий с сертификатом; если
+           достаточно — распределить требуемое количество между ними
+           (жадно, от самой новой партии к самой старой, максимум возможного
+           из каждой), иначе — сообщить о нехватке.
 
         Args:
-            row: Строка заказа (мутируется при успехе).
+            row: Строка заказа (мутируется при успехе одной партией).
 
         Returns:
-            Причина исключения строки из обычного подбора либо ``None``,
-            если строку можно передавать в обычный подбор как обычно —
-            либо потому что срок уже был в заказе, либо потому что новый
-            этап успешно его подобрал.
+            ``None`` — строку можно передавать в обычный подбор как обычно
+            (либо срок уже был в заказе, либо Этап 1 подобрал его одной
+            партией); список :class:`BatchAllocation` — строка выполнена
+            комбинацией нескольких партий (Этап 2), сертификаты для неё уже
+            найдены; :class:`ExpiryExclusion` — строку выполнить не удалось.
         """
         if row.requested_expiry is not None:
             # Заказ уже указывает требуемый срок — это осознанный выбор
@@ -149,37 +202,164 @@ class ExpiryResolutionService:
 
         entries = self._stock.find_by_product_name(normalize(row.product_name))
         if not entries:
-            return ExpiryExclusion(note="Товар отсутствует в базе сроков.", not_in_database=True)
+            exclusion = ExpiryExclusion(
+                note="Товар отсутствует в базе сроков.", not_in_database=True
+            )
+            _LOGGER.debug("Товар «%s» отсутствует в базе сроков годности", row.product_name)
+            return exclusion
 
         newest_first = sorted(
             entries, key=lambda entry: entry.expiry_date or date.min, reverse=True
         )
-
         required_quantity = row.quantity or 0.0
-        any_sufficient_quantity = False
-        for entry in newest_first:
-            if entry.quantity < required_quantity:
-                continue
-            any_sufficient_quantity = True
 
+        # Шаг 1: проверка сертификата для каждой партии по очереди — если
+        # какая-то одна партия покрывает заказ целиком, останавливаемся
+        # сразу (Этап 1, эффективность и результат как раньше). Если нет —
+        # к моменту исчерпания партий уже накоплены проверенные данные по
+        # всем им, ровно то, что нужно Этапу 2 для комбинации.
+        checks: list[_BatchCheck] = []
+        for entry in newest_first:
             row.requested_expiry = entry.expiry_date
             trial = self._matching.match_row(row)
-            if trial.status is MatchStatus.MATCHED:
+            candidate = trial.selected if trial.status is MatchStatus.MATCHED else None
+            available = entry.quantity if candidate is not None else 0.0
+            checks.append(_BatchCheck(entry=entry, candidate=candidate, available=available))
+
+            if candidate is not None and available >= required_quantity:
                 _LOGGER.debug(
-                    "Срок годности подобран для «%s»: %s", row.product_name, entry.expiry_date
+                    "Срок годности подобран для «%s»: %s (одна партия)",
+                    row.product_name,
+                    entry.expiry_date,
                 )
+                self._log_diagnostics(row, required_quantity, checks, outcome="одна партия")
                 return None
             row.requested_expiry = None
 
-        if not any_sufficient_quantity:
-            # «Ничего пока не делать» для случая суммарно достаточного, но
-            # раздельно недостаточного остатка — п. «Если количества не
-            # хватает» требования: логика частичного резервирования по
-            # нескольким срокам сразу будет реализована позже.
-            return ExpiryExclusion(
-                note="Недостаточное количество ни на одном сроке базы — требуется ручная обработка."
-            )
+        return self._resolve_combination(row, required_quantity, checks)
 
-        return ExpiryExclusion(
-            note="Ни для одного срока с достаточным количеством не найден сертификат."
+    def _resolve_combination(
+        self, row: OrderRow, required_quantity: float, checks: list[_BatchCheck]
+    ) -> ExpiryExclusion | list[BatchAllocation]:
+        """Этап 2: пытается покрыть заказ комбинацией нескольких партий.
+
+        Args:
+            row: Строка заказа.
+            required_quantity: Требуемое количество.
+            checks: Результаты проверки всех партий товара (см. :meth:`_resolve_row`).
+
+        Returns:
+            Распределение по партиям либо причина, по которой выполнить
+            заказ не удалось.
+        """
+        certified = [check for check in checks if check.has_certificate]
+
+        if not certified:
+            exclusion = ExpiryExclusion(
+                note="Для доступных сроков не найден подходящий сертификат.",
+                no_certificate_available=True,
+            )
+            self._log_diagnostics(row, required_quantity, checks, outcome=exclusion.note)
+            return exclusion
+
+        total_available = sum(check.available for check in certified)
+        if total_available < required_quantity:
+            exclusion = ExpiryExclusion(
+                note="Недостаточно остатка по партиям с подходящими сертификатами."
+            )
+            self._log_diagnostics(row, required_quantity, checks, outcome=exclusion.note)
+            return exclusion
+
+        allocations = self._allocate(certified, required_quantity)
+        _LOGGER.debug(
+            "Заказ «%s» выполнен комбинацией из %s партий",
+            row.product_name,
+            len(allocations),
         )
+        self._log_diagnostics(
+            row, required_quantity, checks, outcome="комбинация партий", allocations=allocations
+        )
+        return allocations
+
+    def _allocate(
+        self, certified: list[_BatchCheck], required_quantity: float
+    ) -> list[BatchAllocation]:
+        """Жадно распределяет требуемое количество по партиям от новой к старой.
+
+        Условие вызова — суммарного доступного остатка партий с
+        сертификатом достаточно (проверено в :meth:`_resolve_combination`).
+        Из каждой партии (начиная с самой новой) берётся максимум
+        возможного — ровно столько, сколько ещё недостаёт до требуемого
+        количества, — что одновременно минимизирует число использованных
+        партий, предпочитает более свежие сроки и не расходует лишний
+        остаток сверх необходимого (правила приоритета требования).
+
+        Args:
+            certified: Партии с подтверждённым сертификатом, отсортированные
+                от новой к старой.
+            required_quantity: Требуемое количество.
+
+        Returns:
+            Партии с распределённым по ним количеством, в порядке
+            использования (от новой к старой).
+        """
+        allocations: list[BatchAllocation] = []
+        remaining = required_quantity
+        for check in certified:
+            if remaining <= 0:
+                break
+            if check.candidate is None or check.available <= 0:
+                continue
+            take = min(remaining, check.available)
+            allocations.append(
+                BatchAllocation(
+                    candidate=check.candidate, quantity=take, expiry_date=check.entry.expiry_date
+                )
+            )
+            remaining -= take
+        return allocations
+
+    # ------------------------------------------------------------ журнал
+    def _log_diagnostics(
+        self,
+        row: OrderRow,
+        required_quantity: float,
+        checks: list[_BatchCheck],
+        *,
+        outcome: str,
+        allocations: list[BatchAllocation] | None = None,
+    ) -> None:
+        """Записывает в журнал полную раскладку подбора партий по товару.
+
+        Формат соответствует требованию — по каждой партии остаток, статус
+        сертификата, доступное количество; далее суммарный доступный
+        остаток, выбранное распределение (если есть) и итог. Уровень
+        DEBUG — сообщение многострочное и на больших заказах многочисленное.
+        """
+        if not _LOGGER.isEnabledFor(logging.DEBUG):
+            return
+
+        lines = [f"Товар: {row.product_name}", f"Требуется: {_format_quantity(required_quantity)}"]
+        for position, check in enumerate(checks, start=1):
+            certificate_status = "найден" if check.has_certificate else "не найден"
+            lines.append(
+                f"Партия {position}: {format_date(check.entry.expiry_date)} · "
+                f"остаток {_format_quantity(check.entry.quantity)} · "
+                f"сертификат {certificate_status} · "
+                f"доступно {_format_quantity(check.available)}"
+            )
+        total_available = sum(check.available for check in checks)
+        lines.append(f"Суммарный доступный остаток: {_format_quantity(total_available)}")
+        if allocations:
+            distribution = ", ".join(
+                f"{_format_quantity(allocation.quantity)} → {format_date(allocation.expiry_date)}"
+                for allocation in allocations
+            )
+            lines.append(f"Распределение: {distribution}")
+        lines.append(f"Результат: {outcome}")
+        _LOGGER.debug("\n".join(lines))
+
+
+def _format_quantity(value: float) -> str:
+    """Форматирует количество для журнала и Excel без лишних нулей после запятой."""
+    return f"{value:g}"

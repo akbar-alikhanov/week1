@@ -9,6 +9,7 @@ from app.models.certificate_product import CertificateProduct
 from app.models.expiry_stock import ExpiryStockEntry
 from app.models.history import ImportResult, ProcessingItem, ProcessingRun
 from app.models.matching import (
+    BatchAllocation,
     MatchCandidate,
     MatchResult,
     MatchSource,
@@ -20,6 +21,7 @@ from app.models.product import Product
 
 __all__ = [
     "Alias",
+    "BatchAllocation",
     "CertificateProduct",
     "ExpiryStockEntry",
     "ImportResult",

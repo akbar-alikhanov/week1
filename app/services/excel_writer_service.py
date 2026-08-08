@@ -27,10 +27,19 @@
 если такой колонки в заказе нет вообще, она не создаётся, а колонка
 пропускается.
 
+Если для строки заказа одной партии не хватило и подбор срока годности
+собрал её из нескольких партий сразу (Этап 2 —
+:attr:`~app.models.matching.MatchResult.batch_allocations`), колонки E и F
+получают не одно, а все использованные значения — каждое на отдельной
+строке внутри той же ячейки (перенос строки), — а третья, новая колонка G
+(:data:`~app.parsers.column_mapper.ROLE_BATCH_ALLOCATION`) построчно
+показывает, сколько именно взято из какой партии. Для обычных, однопартийных
+строк колонка G остаётся пустой.
+
 Копия делается средствами openpyxl с сохранением форматирования, формул,
 объединённых ячеек и ширины колонок: пользователь получает свой привычный
 документ, в котором просто добавлены (или обновлены, если уже существуют)
-две колонки — «Сертификат» и «С.Г. сертификата».
+колонки «Сертификат», «С.Г. сертификата» и «Распределение количества».
 """
 
 from __future__ import annotations
@@ -45,7 +54,12 @@ from app.core.constants import STATUS_AMBIGUOUS, STATUS_MATCHED, STATUS_NOT_FOUN
 from app.core.exceptions import ExportError
 from app.models.matching import MatchResult, MatchStatus
 from app.models.order import OrderDocument
-from app.parsers.column_mapper import ROLE_CERTIFICATE, ROLE_CERTIFICATE_EXPIRY, ROLE_EXPIRY
+from app.parsers.column_mapper import (
+    ROLE_BATCH_ALLOCATION,
+    ROLE_CERTIFICATE,
+    ROLE_CERTIFICATE_EXPIRY,
+    ROLE_EXPIRY,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -53,10 +67,13 @@ _LOGGER = logging.getLogger(__name__)
 class ExcelWriterService:
     """Записывает результаты подбора в копию файла заказа.
 
-    Пишет ровно в две свои колонки — номер найденного сертификата и его срок
-    годности (роли :data:`~app.parsers.column_mapper.ROLE_CERTIFICATE` и
-    :data:`~app.parsers.column_mapper.ROLE_CERTIFICATE_EXPIRY`) — и никогда не
-    создаёт новых колонок сверх этого. Колонка требуемого срока годности
+    Пишет в свои колонки — номер найденного сертификата, его срок годности
+    и (только для строк, выполненных несколькими партиями сразу)
+    распределение количества по ним (роли
+    :data:`~app.parsers.column_mapper.ROLE_CERTIFICATE`,
+    :data:`~app.parsers.column_mapper.ROLE_CERTIFICATE_EXPIRY`,
+    :data:`~app.parsers.column_mapper.ROLE_BATCH_ALLOCATION`) — и никогда не
+    создаёт новых колонок сверх этих трёх. Колонка требуемого срока годности
     (:data:`~app.parsers.column_mapper.ROLE_EXPIRY`) не создаётся и не
     перезаписывается, если в ней уже было значение; единственное исключение —
     строки с :attr:`~app.models.matching.MatchResult.expiry_auto_resolved`
@@ -139,6 +156,12 @@ class ExcelWriterService:
             expiry_column = self._resolve_column(
                 sheet, document, ROLE_CERTIFICATE_EXPIRY, self._settings.expiry_column_title
             )
+            allocation_column = self._resolve_column(
+                sheet,
+                document,
+                ROLE_BATCH_ALLOCATION,
+                self._settings.batch_allocation_column_title,
+            )
             score_column = (
                 self._resolve_column(sheet, document, "score", "Совпадение, %")
                 if self._settings.add_score_column
@@ -161,6 +184,7 @@ class ExcelWriterService:
             }
             expiry_missing_fill = PatternFill("solid", fgColor=self._settings.color_expiry_missing)
             alignment = Alignment(horizontal="center", vertical="center")
+            wrap_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
             written = 0
             for result in results:
@@ -169,12 +193,43 @@ class ExcelWriterService:
                 row_index = result.row.row_number
 
                 certificate_cell = sheet.cell(row=row_index, column=certificate_column)
-                certificate_cell.value = result.certificate_number or ""
-                certificate_cell.alignment = alignment
-
                 expiry_cell = sheet.cell(row=row_index, column=expiry_column)
-                expiry_cell.value = self._format_expiry(result.expiry_date)
-                expiry_cell.alignment = alignment
+                allocation_cell = sheet.cell(row=row_index, column=allocation_column)
+
+                if result.batch_allocations:
+                    # Этап 2: одной партии не хватило, заказ выполнен
+                    # несколькими сразу — каждая партия на отдельной строке
+                    # внутри той же ячейки (см. докстринг модуля).
+                    certificate_cell.value = "\n".join(
+                        allocation.certificate.display_number
+                        for allocation in result.batch_allocations
+                    )
+                    certificate_cell.alignment = wrap_alignment
+
+                    expiry_cell.value = "\n".join(
+                        self._format_expiry(allocation.expiry_date)
+                        for allocation in result.batch_allocations
+                    )
+                    expiry_cell.alignment = wrap_alignment
+
+                    allocation_cell.value = "\n".join(
+                        f"{_format_quantity(allocation.quantity)} шт. → "
+                        f"{self._format_expiry(allocation.expiry_date)}"
+                        for allocation in result.batch_allocations
+                    )
+                    allocation_cell.alignment = wrap_alignment
+                else:
+                    certificate_cell.value = result.certificate_number or ""
+                    certificate_cell.alignment = alignment
+
+                    expiry_cell.value = self._format_expiry(result.expiry_date)
+                    expiry_cell.alignment = alignment
+
+                    # Строка могла быть выполнена несколькими партиями при
+                    # предыдущей обработке того же файла — очищаем колонку,
+                    # чтобы не оставлять устаревшее распределение.
+                    allocation_cell.value = ""
+                    allocation_cell.alignment = alignment
 
                 if score_column is not None:
                     score_cell = sheet.cell(row=row_index, column=score_column)
@@ -203,12 +258,14 @@ class ExcelWriterService:
                     requested_expiry_cell.number_format = "DD.MM.YYYY"
                     requested_expiry_cell.alignment = alignment
 
-                # Товар вне базы сроков годности — этап подбора сертификата
-                # для строки вообще не выполнялся (см. ExpiryResolutionService),
-                # поэтому строка выделяется безусловно, независимо от
-                # highlight_rows: это не декоративная подсветка статуса, а
-                # сигнал «сюда программа даже не заглядывала».
-                if result.expiry_not_in_database:
+                # Товар вне базы сроков годности либо в базе есть, но ни для
+                # одной его партии не подтверждён сертификат — в обоих
+                # случаях подбор сертификата для строки вообще не выполнялся
+                # (см. ExpiryResolutionService), поэтому строка выделяется
+                # безусловно, независимо от highlight_rows: это не
+                # декоративная подсветка статуса, а сигнал «сюда программа
+                # даже не заглядывала».
+                if result.expiry_not_in_database or result.expiry_no_certificate_available:
                     self._highlight_row(sheet, row_index, expiry_missing_fill, document)
                     self._strike_row(sheet, row_index, Font, document)
                 elif self._settings.highlight_rows:
@@ -218,8 +275,13 @@ class ExcelWriterService:
 
                 written += 1
 
-            self._style_header(sheet, document.header_row, certificate_column, expiry_column, Font)
-            self._autosize(sheet, (certificate_column, expiry_column))
+            self._style_header(
+                sheet,
+                document.header_row,
+                (certificate_column, expiry_column, allocation_column),
+                Font,
+            )
+            self._autosize(sheet, (certificate_column, expiry_column, allocation_column))
 
             destination.parent.mkdir(parents=True, exist_ok=True)
             workbook.save(destination)
@@ -279,17 +341,12 @@ class ExcelWriterService:
             sheet.cell(row=row_index, column=column).font = font_class(strike=True)
 
     def _style_header(
-        self,
-        sheet: Any,
-        header_row: int,
-        certificate_column: int,
-        expiry_column: int,
-        font_class: Any,
+        self, sheet: Any, header_row: int, columns: tuple[int, ...], font_class: Any
     ) -> None:
         """Выделяет заголовки добавленных колонок."""
         if header_row <= 0:
             return
-        for column in (certificate_column, expiry_column):
+        for column in columns:
             cell = sheet.cell(row=header_row, column=column)
             if cell.value:
                 cell.font = font_class(bold=True)
@@ -317,3 +374,8 @@ def _status_key(status: MatchStatus) -> str:
     if status is MatchStatus.AMBIGUOUS:
         return STATUS_AMBIGUOUS
     return STATUS_NOT_FOUND
+
+
+def _format_quantity(value: float) -> str:
+    """Форматирует количество для колонки распределения без лишних нулей после запятой."""
+    return f"{value:g}"

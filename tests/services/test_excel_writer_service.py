@@ -14,6 +14,7 @@ openpyxl = pytest.importorskip("openpyxl")
 
 from app.config.settings import ExportSettings  # noqa: E402
 from app.models.matching import (  # noqa: E402
+    BatchAllocation,
     MatchCandidate,
     MatchResult,
     MatchSource,
@@ -22,6 +23,7 @@ from app.models.matching import (  # noqa: E402
 )
 from app.models.order import OrderDocument, OrderRow  # noqa: E402
 from app.parsers.column_mapper import (  # noqa: E402
+    ROLE_BATCH_ALLOCATION,
     ROLE_CERTIFICATE,
     ROLE_CERTIFICATE_EXPIRY,
     ROLE_EXPIRY,
@@ -177,6 +179,38 @@ def _auto_resolved_result(row: OrderRow, *, resolved_expiry: dt.date) -> MatchRe
     result = _matched_result(row)
     result.expiry_auto_resolved = True
     return result
+
+
+def _combined_result(row: OrderRow, batches: list[tuple[str, dt.date, float]]) -> MatchResult:
+    """Создаёт результат, выполненный несколькими партиями сразу (Этап 2).
+
+    Имитирует то, что делает ``OrderProcessingService`` после успешной
+    комбинации в ``ExpiryResolutionService``: сертификаты уже найдены,
+    здесь они лишь оборачиваются в готовый результат — как строит его
+    ``_build_combined_result`` в проверяемом коде.
+
+    Args:
+        row: Строка заказа.
+        batches: Партии в порядке использования — (номер сертификата, срок,
+            использованное количество).
+    """
+    allocations = []
+    for certificate_number, expiry_date, quantity in batches:
+        certificate = make_certificate(
+            row.product_name, certificate_number=certificate_number, expiry_date=expiry_date
+        )
+        score = ScoreBreakdown(name=1.0, volume=1.0, expiry=1.0, total=1.0)
+        candidate = MatchCandidate(certificate=certificate, score=score, source=MatchSource.EXACT)
+        allocations.append(
+            BatchAllocation(candidate=candidate, quantity=quantity, expiry_date=expiry_date)
+        )
+    return MatchResult(
+        row=row,
+        status=MatchStatus.MATCHED,
+        candidates=[allocation.candidate for allocation in allocations],
+        selected_index=0,
+        batch_allocations=allocations,
+    )
 
 
 class TestBuildOutputPath:
@@ -399,7 +433,12 @@ class TestRequestedExpiryNeverOverwritten:
 
         result_workbook = openpyxl.load_workbook(destination)
         result_sheet = result_workbook["Заказ"]
-        assert result_sheet.max_column == 6
+        # Колонка G (распределение по партиям) добавляется сверх шести
+        # существующих — этот файл её ещё не содержит, а результат не
+        # многопартийный, поэтому она создаётся пустой.
+        assert result_sheet.max_column == 7
+        assert result_sheet.cell(row=1, column=7).value == "Распределение количества"
+        assert result_sheet.cell(row=2, column=7).value in ("", None)
         assert _cell_date(result_sheet, 2, 4) == dt.date(2029, 4, 1)
         assert result_sheet.cell(row=2, column=5).value == "UZ.183255"
         assert result_sheet.cell(row=2, column=6).value == "22.03.2029"
@@ -478,10 +517,11 @@ class TestAutoResolvedExpiryWrittenToRequestedColumn:
 
         workbook = openpyxl.load_workbook(destination)
         sheet = workbook["Заказ"]
-        # Только колонки сертификата (3) и его срока (4) добавлены сверх
-        # исходных двух («№», «Наименование товара») — никакой третьей новой
-        # колонки под требуемый срок годности не появилось.
-        assert sheet.max_column == 4
+        # Только колонки сертификата (3), его срока (4) и распределения по
+        # партиям (5) добавлены сверх исходных двух («№», «Наименование
+        # товара») — никакой отдельной новой колонки под требуемый срок
+        # годности (которой не было в исходном файле) не появилось.
+        assert sheet.max_column == 5
         workbook.close()
 
     def test_not_auto_resolved_result_never_writes_column(self, tmp_path: Path) -> None:
@@ -602,3 +642,168 @@ class TestExpiryMissingFormatting:
         missing_workbook.close()
 
         assert ordinary_fill != missing_fill
+
+
+class TestBatchAllocationsWrittenAsMultiLine:
+    """Этап 2: заказ, выполненный несколькими партиями — многострочные E/F и колонка G."""
+
+    def test_multiple_certificates_written_one_per_line(self, tmp_path: Path) -> None:
+        """Номера и сроки всех использованных сертификатов — каждый на своей строке."""
+        order_path = tmp_path / "order.xlsx"
+        _build_order_file(order_path)
+        document = _document(order_path)
+        row = document.rows[0]
+        result = _combined_result(
+            row,
+            [
+                ("UZ.1001", dt.date(2029, 5, 25), 1068),
+                ("UZ.1002", dt.date(2027, 1, 1), 432),
+            ],
+        )
+
+        writer = ExcelWriterService(ExportSettings())
+        destination = writer.build_output_path(order_path)
+        writer.write(document, [result, _not_found_result(document.rows[1])], destination)
+
+        workbook = openpyxl.load_workbook(destination)
+        sheet = workbook["Заказ"]
+        assert sheet.cell(row=2, column=3).value == "UZ.1001\nUZ.1002"
+        assert sheet.cell(row=2, column=4).value == "25.05.2029\n01.01.2027"
+        workbook.close()
+
+    def test_allocation_column_shows_quantity_per_batch(self, tmp_path: Path) -> None:
+        """Колонка «Распределение количества» построчно показывает партия → количество."""
+        order_path = tmp_path / "order.xlsx"
+        _build_order_file(order_path)
+        document = _document(order_path)
+        row = document.rows[0]
+        result = _combined_result(
+            row,
+            [
+                ("UZ.1001", dt.date(2029, 5, 25), 1068),
+                ("UZ.1002", dt.date(2027, 1, 1), 432),
+            ],
+        )
+
+        writer = ExcelWriterService(ExportSettings())
+        destination = writer.build_output_path(order_path)
+        writer.write(document, [result, _not_found_result(document.rows[1])], destination)
+
+        workbook = openpyxl.load_workbook(destination)
+        sheet = workbook["Заказ"]
+        assert sheet.cell(row=1, column=5).value == "Распределение количества"
+        assert sheet.cell(row=2, column=5).value == "1068 шт. → 25.05.2029\n432 шт. → 01.01.2027"
+        workbook.close()
+
+    def test_cells_use_wrap_text_alignment(self, tmp_path: Path) -> None:
+        """Многострочные ячейки получают перенос строки, иначе текст не будет виден."""
+        order_path = tmp_path / "order.xlsx"
+        _build_order_file(order_path)
+        document = _document(order_path)
+        row = document.rows[0]
+        result = _combined_result(
+            row, [("UZ.1001", dt.date(2029, 5, 25), 60), ("UZ.1002", dt.date(2027, 1, 1), 40)]
+        )
+
+        writer = ExcelWriterService(ExportSettings())
+        destination = writer.build_output_path(order_path)
+        writer.write(document, [result, _not_found_result(document.rows[1])], destination)
+
+        workbook = openpyxl.load_workbook(destination)
+        sheet = workbook["Заказ"]
+        assert sheet.cell(row=2, column=3).alignment.wrap_text is True
+        assert sheet.cell(row=2, column=4).alignment.wrap_text is True
+        assert sheet.cell(row=2, column=5).alignment.wrap_text is True
+        workbook.close()
+
+    def test_single_batch_result_does_not_use_multiline_format(self, tmp_path: Path) -> None:
+        """Обычный (однопартийный) результат по-прежнему пишет одну строку без переноса."""
+        order_path = tmp_path / "order.xlsx"
+        _build_order_file(order_path)
+        document = _document(order_path)
+        results = [_matched_result(document.rows[0]), _not_found_result(document.rows[1])]
+
+        writer = ExcelWriterService(ExportSettings())
+        destination = writer.build_output_path(order_path)
+        writer.write(document, results, destination)
+
+        workbook = openpyxl.load_workbook(destination)
+        sheet = workbook["Заказ"]
+        assert sheet.cell(row=2, column=3).value == "UZ.183255"
+        assert "\n" not in str(sheet.cell(row=2, column=3).value)
+        assert sheet.cell(row=2, column=5).value in ("", None)
+        workbook.close()
+
+    def test_allocation_column_created_with_title_even_without_multibatch_rows(
+        self, tmp_path: Path
+    ) -> None:
+        """Колонка G создаётся всегда (как E/F), даже если ни одна строка её не использует."""
+        order_path = tmp_path / "order.xlsx"
+        _build_order_file(order_path)
+        document = _document(order_path)
+        results = [_matched_result(document.rows[0]), _not_found_result(document.rows[1])]
+
+        writer = ExcelWriterService(ExportSettings())
+        destination = writer.build_output_path(order_path)
+        writer.write(document, results, destination)
+
+        workbook = openpyxl.load_workbook(destination)
+        sheet = workbook["Заказ"]
+        assert sheet.cell(row=1, column=5).value == "Распределение количества"
+        assert sheet.cell(row=1, column=5).font.bold is True
+        workbook.close()
+
+    def test_reprocessing_clears_stale_allocation_from_previous_run(self, tmp_path: Path) -> None:
+        """Повторная обработка убирает устаревшее распределение из прошлого запуска.
+
+        Регрессия: если в прошлый раз строка была выполнена несколькими
+        партиями, а теперь (после обновления остатков) её закрывает одна
+        партия, колонка G не должна продолжать показывать старую раскладку.
+        """
+        order_path = tmp_path / "order.xlsx"
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        sheet.title = "Заказ"
+        sheet.append(
+            [
+                "№",
+                "Наименование товара",
+                "Сертификат",
+                "С.Г. сертификата",
+                "Распределение количества",
+            ]
+        )
+        sheet.append(
+            [
+                1,
+                "Лечебные травы 100 мл",
+                "UZ.1\nUZ.2",
+                "25.05.2029\n01.01.2027",
+                "600 шт. → 25.05.2029\n400 шт. → 01.01.2027",
+            ]
+        )
+        workbook.save(order_path)
+
+        document = OrderDocument(
+            path=order_path,
+            sheet_name="Заказ",
+            header_row=1,
+            column_map={
+                ROLE_PRODUCT: 1,
+                ROLE_CERTIFICATE: 2,
+                ROLE_CERTIFICATE_EXPIRY: 3,
+                ROLE_BATCH_ALLOCATION: 4,
+            },
+        )
+        row = OrderRow(row_number=2, product_name="Лечебные травы 100 мл")
+        document.rows = [row]
+
+        writer = ExcelWriterService(ExportSettings())
+        destination = writer.build_output_path(order_path)
+        writer.write(document, [_matched_result(row)], destination)
+
+        result_workbook = openpyxl.load_workbook(destination)
+        result_sheet = result_workbook["Заказ"]
+        assert result_sheet.cell(row=2, column=3).value == "UZ.183255"
+        assert result_sheet.cell(row=2, column=5).value in ("", None)
+        result_workbook.close()

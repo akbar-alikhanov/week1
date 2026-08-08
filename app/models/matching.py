@@ -142,6 +142,36 @@ class MatchCandidate:
         return self.score.percent
 
 
+@dataclass(frozen=True, slots=True)
+class BatchAllocation:
+    """Одна партия, использованная при выполнении заказа несколькими сроками годности.
+
+    Строится этапом подбора срока годности
+    (:class:`~app.services.expiry_resolution_service.ExpiryResolutionService`)
+    только тогда, когда ни одна партия товара не покрывает требуемое
+    количество самостоятельно — тогда несколько партий с уже подтверждённым
+    сертификатом объединяются, и для каждой запоминается, сколько именно из
+    неё взято (см. :attr:`MatchResult.batch_allocations`).
+
+    Attributes:
+        candidate: Кандидат, которым пробный подбор подтвердил сертификат
+            для срока этой партии, — тот же объект, что построил бы обычный
+            подбор сертификата, включая его настоящую оценку и источник.
+        quantity: Сколько единиц товара взято из этой партии (не обязательно
+            весь остаток).
+        expiry_date: Срок годности партии.
+    """
+
+    candidate: MatchCandidate
+    quantity: float
+    expiry_date: date | None
+
+    @property
+    def certificate(self) -> CertificateProduct:
+        """Сертификат, подтверждённый для этой партии."""
+        return self.candidate.certificate
+
+
 @dataclass(slots=True)
 class MatchResult:
     """Результат подбора сертификата для одной строки заказа.
@@ -170,6 +200,20 @@ class MatchResult:
             Только при этом признаке колонка «требуемый срок» исходного
             заказа заполняется в итоговом Excel — если срок уже был указан
             в заказе, колонка остаётся нетронутой независимо от этого поля.
+        expiry_no_certificate_available: Признак того, что товар присутствует
+            в базе сроков годности, но ни для одной его партии не подтверждён
+            сертификат (Этап 2 подбора срока годности). Как и
+            ``expiry_not_in_database``, требует жёлтой заливки и зачёркнутого
+            текста — строка ни разу не дошла до подбора сертификата.
+        batch_allocations: Партии, использованные для выполнения заказа,
+            если одной партии не хватило и потребовалось объединение
+            нескольких сроков годности (Этап 2). Пустой список — обычный
+            случай одной партии/одного сертификата; ``certificate``,
+            ``certificate_number`` и ``expiry_date`` при этом по-прежнему
+            отражают первую (самую новую) использованную партию, а полную
+            раскладку по всем партиям читает
+            :class:`~app.services.excel_writer_service.ExcelWriterService`
+            из этого поля.
     """
 
     row: OrderRow
@@ -182,6 +226,8 @@ class MatchResult:
     alias_stale: bool = False
     expiry_not_in_database: bool = False
     expiry_auto_resolved: bool = False
+    expiry_no_certificate_available: bool = False
+    batch_allocations: list[BatchAllocation] = field(default_factory=list)
 
     @property
     def selected(self) -> MatchCandidate | None:

@@ -35,6 +35,7 @@ ROLE_NUMBER: Final[str] = "number"
 ROLE_CERTIFICATE: Final[str] = "certificate"
 ROLE_EXPIRY: Final[str] = "expiry"
 ROLE_CERTIFICATE_EXPIRY: Final[str] = "certificate_expiry"
+ROLE_BATCH_ALLOCATION: Final[str] = "batch_allocation"
 
 #: Ключевые слова заголовков для каждой роли.
 #: Сопоставление идёт по вхождению подстроки в нормализованный заголовок.
@@ -94,6 +95,17 @@ _ROLE_KEYWORDS: Final[dict[str, tuple[str, ...]]] = {
         "срок сертификата",
         "certificate expiry",
         "cert expiry",
+    ),
+    # Колонка G Этапа 2: если заказ выполнен несколькими партиями сразу
+    # (одной не хватило на требуемое количество), сюда пишется, сколько
+    # взято из какой партии. Создаётся и переиспользуется программой так же,
+    # как ROLE_CERTIFICATE/ROLE_CERTIFICATE_EXPIRY — колонка исходного
+    # заказа с этой ролью не связана и никогда не читается при разборе.
+    ROLE_BATCH_ALLOCATION: (
+        "распределение количества",
+        "распределение",
+        "batch allocation",
+        "allocation",
     ),
     ROLE_QUANTITY: (
         "кол во",

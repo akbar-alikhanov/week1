@@ -558,3 +558,121 @@ class TestExpiryResolutionIntegration:
         assert result.status is MatchStatus.MATCHED
         assert result.expiry_not_in_database is False
         assert result.expiry_auto_resolved is False
+
+
+class TestBatchCombinationIntegration:
+    """Этап 2 целиком: заказ, который не покрывается одной партией, доходит до Excel.
+
+    Сквозная проверка всего пути — от заказа без указанного срока годности
+    до готового файла с несколькими сертификатами и колонкой распределения,
+    — а не отдельного модуля: именно так это будет выглядеть при реальном
+    нажатии кнопки в интерфейсе.
+    """
+
+    def test_order_fulfilled_by_two_batches_writes_multiline_excel(
+        self,
+        order_service_with_expiry: tuple[
+            OrderProcessingService, ExpiryStockRepository, CertificateProductRepository
+        ],
+        tmp_path: Path,
+    ) -> None:
+        """Ни одна партия не покрывает заказ — используются две, обе видны в итоговом файле."""
+        service, expiry_stock, certificates = order_service_with_expiry
+        certificates.replace_all(
+            [
+                make_certificate(
+                    "Крем детский 100 мл",
+                    expiry_date=dt.date(2029, 5, 25),
+                    certificate_number="UZ.1001",
+                ),
+                make_certificate(
+                    "Крем детский 100 мл",
+                    expiry_date=dt.date(2027, 1, 1),
+                    certificate_number="UZ.1002",
+                ),
+            ]
+        )
+        expiry_stock.replace_all(
+            [
+                make_expiry_entry(
+                    "Крем детский 100 мл", expiry_date=dt.date(2029, 5, 25), quantity=60
+                ),
+                make_expiry_entry(
+                    "Крем детский 100 мл", expiry_date=dt.date(2027, 1, 1), quantity=50
+                ),
+            ]
+        )
+
+        order_path = tmp_path / "Заказ.xlsx"
+        _build_order_file_with_expiry_column(order_path, [("Крем детский 100 мл", 100)])
+
+        outcome = service.process(ProcessingRequest(order_path=order_path))
+
+        result = outcome.results[0]
+        assert result.status is MatchStatus.MATCHED
+        assert len(result.batch_allocations) == 2
+        assert [a.quantity for a in result.batch_allocations] == [60, 40]
+        # Комбинация — не единый срок, колонка D (требуемый срок) остаётся
+        # нетронутой (пустой), в отличие от случая с одной подобранной датой.
+        assert result.expiry_auto_resolved is False
+        assert result.row.requested_expiry is None
+
+        workbook = openpyxl.load_workbook(outcome.output_file)
+        sheet = workbook["Заказ"]
+        # Колонки файла: №(1), Наименование(2), Кол-во(3), Требуемый срок(4),
+        # Сертификат(5), Срок сертификата(6) — все существуют в исходном
+        # файле; колонка распределения (7) новая, дописана writer'ом.
+        certificate_cell = sheet.cell(row=2, column=5).value
+        expiry_cell = sheet.cell(row=2, column=6).value
+        allocation_cell = sheet.cell(row=2, column=7).value
+        assert certificate_cell == "UZ.1001\nUZ.1002"
+        assert expiry_cell == "25.05.2029\n01.01.2027"
+        assert allocation_cell is not None and "60" in allocation_cell and "40" in allocation_cell
+        assert sheet.cell(row=2, column=4).value is None
+        workbook.close()
+
+    def test_batch_without_certificate_excluded_from_order_total(
+        self,
+        order_service_with_expiry: tuple[
+            OrderProcessingService, ExpiryStockRepository, CertificateProductRepository
+        ],
+        tmp_path: Path,
+    ) -> None:
+        """Партия без сертификата не засчитывается — заказ остаётся невыполненным.
+
+        Сквозная проверка критического случая требования: физический остаток
+        партии без сертификата (1000 шт.) не спасает заказ на 100 шт., если
+        доступный (подтверждённый сертификатом) остаток — всего 60.
+        """
+        service, expiry_stock, certificates = order_service_with_expiry
+        certificates.replace_all(
+            [
+                make_certificate(
+                    "Крем детский 100 мл",
+                    expiry_date=dt.date(2029, 5, 25),
+                    certificate_number="UZ.1001",
+                )
+            ]
+        )
+        expiry_stock.replace_all(
+            [
+                make_expiry_entry(
+                    "Крем детский 100 мл", expiry_date=dt.date(2029, 5, 25), quantity=60
+                ),
+                make_expiry_entry(
+                    "Крем детский 100 мл", expiry_date=dt.date(2024, 1, 1), quantity=1000
+                ),
+            ]
+        )
+
+        order_path = tmp_path / "Заказ.xlsx"
+        _build_order_file_with_expiry_column(order_path, [("Крем детский 100 мл", 100)])
+
+        outcome = service.process(ProcessingRequest(order_path=order_path))
+
+        result = outcome.results[0]
+        assert result.status is MatchStatus.NOT_FOUND
+        assert result.batch_allocations == []
+        assert result.expiry_not_in_database is False
+        assert result.expiry_no_certificate_available is False
+        assert "Недостаточно остатка" in result.note

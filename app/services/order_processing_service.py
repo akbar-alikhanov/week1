@@ -22,7 +22,7 @@ from app.config.settings import SettingsService
 from app.core.events import AppEvent, EventBus, ProgressReporter
 from app.core.exceptions import CertMatcherError, OperationCancelledError
 from app.models.history import ProcessingItem, ProcessingRun
-from app.models.matching import MatchResult, MatchStatus
+from app.models.matching import BatchAllocation, MatchResult, MatchStatus
 from app.models.order import OrderDocument, OrderRow
 from app.parsers.excel_order_parser import ExcelOrderParser
 from app.repositories.history_repository import HistoryRepository
@@ -203,31 +203,40 @@ class OrderProcessingService:
             # --- Шаг 1а. Подбор срока годности (новый этап, до сертификата) -
             # Выполняется целиком до подбора сертификата и не изменяет сам
             # MatchingService: для строк без указанного срока подбирает его
-            # по отдельной базе сроков годности и остатков, пробными
-            # вызовами уже существующего MatchingService.match_row проверяя,
-            # находится ли сертификат на каждый кандидат. Отсутствие
-            # сервиса (не настроен) или пустая база — этот шаг не делает
-            # ничего, поведение не отличается от прежнего.
+            # по отдельной базе сроков годности и остатков (одной партией
+            # либо, если ни одна не покрывает заказ в одиночку, комбинацией
+            # нескольких — Этап 2), пробными вызовами уже существующего
+            # MatchingService.match_row проверяя, находится ли сертификат на
+            # каждую партию. Отсутствие сервиса (не настроен) или пустая
+            # база — этот шаг не делает ничего, поведение не отличается от
+            # прежнего. Результат для строк, чей срок(и) подобрал этот этап
+            # (исключённых или выполненных комбинацией партий) — готов уже
+            # здесь и в шаг 2 (обычный подбор) эти строки не передаются.
             #
             # Строки без требуемого срока запоминаются ДО вызова, чтобы затем
             # (после подбора сертификата) отличить срок, который подобрал
-            # новый этап, от срока, изначально указанного в заказе, — только
-            # первый разрешено дописать в колонку «требуемый срок» итогового
-            # файла (см. ExcelWriterService и MatchResult.expiry_auto_resolved).
+            # новый этап ОДНОЙ партией, от срока, изначально указанного в
+            # заказе, — только первый разрешено дописать в колонку
+            # «требуемый срок» итогового файла (см. ExcelWriterService и
+            # MatchResult.expiry_auto_resolved). Комбинация нескольких партий
+            # под это не подпадает: единого срока для записи в эту колонку
+            # у неё нет — вместо этого полная раскладка идёт в колонки E/F/G.
             rows_missing_expiry = {
                 row.row_number for row in document.rows if row.requested_expiry is None
             }
-            excluded_rows = self._resolve_expiries(document.rows, reporter)
+            expiry_stage_results = self._resolve_expiries(document.rows, reporter)
             auto_resolved_rows = {
                 row.row_number
                 for row in document.rows
                 if row.row_number in rows_missing_expiry
                 and row.requested_expiry is not None
-                and row.row_number not in excluded_rows
+                and row.row_number not in expiry_stage_results
             }
 
             # --- Шаг 2. Подбор ----------------------------------------------
-            eligible_rows = [row for row in document.rows if row.row_number not in excluded_rows]
+            eligible_rows = [
+                row for row in document.rows if row.row_number not in expiry_stage_results
+            ]
             matched_by_row = {
                 result.row.row_number: result
                 for result in self._matching.match_rows(eligible_rows, reporter=reporter)
@@ -238,8 +247,8 @@ class OrderProcessingService:
                     matched_result.expiry_auto_resolved = True
             outcome.results = [
                 (
-                    excluded_rows[row.row_number]
-                    if row.row_number in excluded_rows
+                    expiry_stage_results[row.row_number]
+                    if row.row_number in expiry_stage_results
                     else matched_by_row[row.row_number]
                 )
                 for row in document.rows
@@ -316,42 +325,54 @@ class OrderProcessingService:
     def _resolve_expiries(
         self, rows: list[OrderRow], reporter: ProgressReporter | None
     ) -> dict[int, MatchResult]:
-        """Подбирает срок годности и строит результаты для исключённых строк.
+        """Подбирает срок годности и строит результаты для строк, минующих обычный подбор.
 
-        Строки, для которых подходящий срок годности подобрать не удалось
-        (товар отсутствует в базе сроков либо ни на одном сроке не хватает
-        количества — см. :class:`~app.services.expiry_resolution_service.ExpiryResolutionService`),
-        не должны попадать в обычный подбор сертификата: он бы проигнорировал
-        причину, по которой новый этап их исключил, и мог случайно подобрать
-        сертификат партии, которой физически не хватает на складе. Для таких
-        строк здесь же формируется финальный результат.
+        Две категории строк не должны попадать в обычный подбор сертификата
+        (см. :class:`~app.services.expiry_resolution_service.ExpiryResolutionService`):
+
+        * исключённые — товар отсутствует в базе сроков, ни для одной его
+          партии не подтверждён сертификат, либо суммарного подтверждённого
+          остатка недостаточно — обычный подбор проигнорировал бы причину
+          исключения и мог случайно подобрать сертификат партии, которой
+          физически не хватает на складе;
+        * выполненные комбинацией нескольких партий (Этап 2) — сертификаты
+          для них уже найдены по каждой партии отдельно, обычному подбору
+          там искать больше нечего, а сам он умеет выбрать только один
+          сертификат на строку.
+
+        Для обеих категорий здесь же формируется финальный результат.
 
         Args:
             rows: Строки заказа.
             reporter: Приёмник прогресса.
 
         Returns:
-            Отображение «номер строки → готовый результат» только для
-            исключённых строк. Пустой словарь, если сервис не подключён,
-            база сроков годности не настроена или подбор успешен для всех.
+            Отображение «номер строки → готовый результат» для обеих
+            категорий выше. Пустой словарь, если сервис не подключён, база
+            сроков годности не настроена или обычный подбор нужен для всех
+            строк как есть.
         """
         if self._expiry is None:
             return {}
 
-        exclusions = self._expiry.resolve_rows(rows, reporter=reporter)
-        if not exclusions:
+        excluded, combined = self._expiry.resolve_rows(rows, reporter=reporter)
+        if not excluded and not combined:
             return {}
 
         rows_by_number = {row.row_number: row for row in rows}
-        return {
+        results: dict[int, MatchResult] = {
             row_number: MatchResult(
                 row=rows_by_number[row_number],
                 status=MatchStatus.NOT_FOUND,
                 note=exclusion.note,
                 expiry_not_in_database=exclusion.not_in_database,
+                expiry_no_certificate_available=exclusion.no_certificate_available,
             )
-            for row_number, exclusion in exclusions.items()
+            for row_number, exclusion in excluded.items()
         }
+        for row_number, allocations in combined.items():
+            results[row_number] = _build_combined_result(rows_by_number[row_number], allocations)
+        return results
 
     def _resolve_ambiguities(self, outcome: ProcessingOutcome, request: ProcessingRequest) -> None:
         """Передаёт неоднозначные результаты на разрешение пользователю.
@@ -448,6 +469,37 @@ class OrderProcessingService:
             _LOGGER.exception("Не удалось обновить справочник товаров")
 
         _LOGGER.info("Обработка завершена за %.2f с: %s", run.duration_seconds, outcome.summary())
+
+
+def _build_combined_result(row: OrderRow, allocations: list[BatchAllocation]) -> MatchResult:
+    """Строит итоговый результат для строки, выполненной несколькими партиями сразу.
+
+    Сертификаты для всех использованных партий уже найдены
+    (:class:`~app.services.expiry_resolution_service.ExpiryResolutionService`)
+    — здесь они лишь оборачиваются в обычный :class:`MatchResult`, как если
+    бы их нашёл обычный подбор. ``candidates``/``selected_index`` указывают
+    на первую (самую новую) партию — через них ``certificate``,
+    ``certificate_number`` и ``expiry_date`` остаются осмысленными для
+    отчёта и истории; полную раскладку по всем партиям несёт
+    ``batch_allocations`` — именно её читает
+    :class:`~app.services.excel_writer_service.ExcelWriterService`.
+
+    Args:
+        row: Строка заказа.
+        allocations: Партии, использованные для её выполнения (Этап 2), в
+            порядке использования — от новой к старой.
+
+    Returns:
+        Результат со статусом :attr:`~app.models.matching.MatchStatus.MATCHED`.
+    """
+    return MatchResult(
+        row=row,
+        status=MatchStatus.MATCHED,
+        candidates=[allocation.candidate for allocation in allocations],
+        selected_index=0,
+        note="Заказ выполнен несколькими партиями с разными сроками годности",
+        batch_allocations=allocations,
+    )
 
 
 def _to_history_item(run_id: str, result: MatchResult) -> ProcessingItem:
