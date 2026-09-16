@@ -1,0 +1,31 @@
+---
+title: "LEFT JOIN"
+objectives:
+  - "Писать LEFT JOIN"
+  - "Понимать, когда появляется NULL"
+---
+
+## Theory
+
+`LEFT JOIN` возвращает все строки левой таблицы, и там, где нет совпадения в правой таблице, столбцы правой таблицы заполняются NULL.
+
+```sql
+SELECT ...
+FROM таблица1
+LEFT JOIN таблица2 ON таблица1.ключ = таблица2.ключ;
+```
+
+## Example
+
+```sql
+SELECT o.order_id, p.amount
+FROM orders o
+LEFT JOIN payments p ON o.order_id = p.order_id;
+```
+
+Вернёт все заказы, даже те, для которых ещё нет платежа (amount будет NULL).
+
+## Common mistakes
+
+- Использовать LEFT JOIN, а затем WHERE p.amount = ... без учёта, что NULL не равен ничему — часть строк неожиданно исчезает.
+

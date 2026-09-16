@@ -1,0 +1,28 @@
+---
+title: "SUM OVER"
+objectives:
+  - "Строить накопительную сумму через SUM OVER"
+---
+
+## Theory
+
+`SUM(столбец) OVER (ORDER BY ...)` считает накопительную сумму (running total): для каждой строки — сумму всех значений от начала окна до текущей строки включительно.
+
+```sql
+SUM(столбец) OVER (ORDER BY столбец_сортировки)
+```
+
+## Example
+
+```sql
+SELECT paid_at, amount,
+  SUM(amount) OVER (ORDER BY paid_at) AS running_total
+FROM payments;
+```
+
+Для каждого платежа покажет накопленную сумму всех платежей до него включительно.
+
+## Common mistakes
+
+- Путать SUM OVER (накопительная сумма по строкам) с обычным GROUP BY + SUM (сумма по группе целиком).
+

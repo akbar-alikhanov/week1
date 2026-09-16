@@ -1,0 +1,26 @@
+---
+title: "COUNT"
+objectives:
+  - "Считать строки с COUNT"
+---
+
+## Theory
+
+`COUNT(*)` считает количество строк в результате, `COUNT(столбец)` — количество непустых (не NULL) значений в столбце.
+
+```sql
+SELECT COUNT(*) FROM таблица;
+```
+
+## Example
+
+```sql
+SELECT COUNT(*) FROM orders WHERE status = 'cancelled';
+```
+
+Посчитает количество отменённых заказов.
+
+## Common mistakes
+
+- Путать COUNT(*) (все строки) с COUNT(column) (только непустые значения этого столбца).
+

@@ -1,0 +1,32 @@
+---
+title: "HAVING"
+objectives:
+  - "Фильтровать результаты GROUP BY через HAVING"
+---
+
+## Theory
+
+`HAVING` фильтрует группы **после** агрегации — в отличие от WHERE, которая фильтрует строки до группировки. HAVING может ссылаться на результат агрегатной функции.
+
+```sql
+SELECT столбец, АГРЕГАТ(...)
+FROM таблица
+GROUP BY столбец
+HAVING АГРЕГАТ(...) > значение;
+```
+
+## Example
+
+```sql
+SELECT category, AVG(price) AS avg_price
+FROM products
+GROUP BY category
+HAVING AVG(price) > 1000;
+```
+
+Вернёт только те категории, средняя цена товаров в которых выше 1000.
+
+## Common mistakes
+
+- Пытаться использовать агрегатную функцию в WHERE вместо HAVING — это вызовет ошибку.
+

@@ -1,0 +1,35 @@
+---
+title: "CTE"
+objectives:
+  - "Строить CTE через WITH"
+  - "Понимать, зачем нужны CTE вместо вложенных подзапросов"
+---
+
+## Theory
+
+CTE (Common Table Expression) — именованный временный результат запроса, объявленный через `WITH`, который можно использовать дальше в основном запросе. Делает сложные запросы более читаемыми, чем вложенные подзапросы.
+
+```sql
+WITH имя_cte AS (
+  SELECT ...
+)
+SELECT * FROM имя_cte WHERE ...;
+```
+
+## Example
+
+```sql
+WITH cancelled_customers AS (
+  SELECT DISTINCT customer_id FROM orders WHERE status = 'cancelled'
+)
+SELECT c.name
+FROM customers c
+JOIN cancelled_customers cc ON c.customer_id = cc.customer_id;
+```
+
+Тот же результат, что и вложенный подзапрос, но читается как последовательность шагов.
+
+## Common mistakes
+
+- Забывать, что CTE существует только в рамках одного запроса и не сохраняется как таблица.
+

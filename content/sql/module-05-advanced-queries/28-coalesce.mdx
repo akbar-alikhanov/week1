@@ -1,0 +1,27 @@
+---
+title: "COALESCE"
+objectives:
+  - "Использовать COALESCE для значений по умолчанию"
+---
+
+## Theory
+
+`COALESCE` возвращает первый не-NULL аргумент из переданного списка — удобно для подстановки значения по умолчанию вместо NULL.
+
+```sql
+COALESCE(значение1, значение2, ..., запасное_значение)
+```
+
+## Example
+
+```sql
+SELECT order_id, COALESCE(amount, 0) AS amount
+FROM payments;
+```
+
+Если amount NULL, вернёт 0 вместо NULL.
+
+## Common mistakes
+
+- Путать COALESCE с ЕСЛИОШИБКА из Excel — COALESCE проверяет именно NULL, а не ошибки вычисления.
+

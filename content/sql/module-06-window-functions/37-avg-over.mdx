@@ -1,0 +1,28 @@
+---
+title: "AVG OVER"
+objectives:
+  - "Строить скользящее среднее через AVG OVER"
+---
+
+## Theory
+
+`AVG(столбец) OVER (...)` аналогично SUM OVER, но считает среднее значение в пределах окна — например, скользящее среднее по последним N строкам.
+
+```sql
+AVG(столбец) OVER (ORDER BY столбец_сортировки)
+```
+
+## Example
+
+```sql
+SELECT paid_at, amount,
+  AVG(amount) OVER (ORDER BY paid_at) AS running_avg
+FROM payments;
+```
+
+Для каждого платежа покажет среднее значение всех платежей до него включительно.
+
+## Common mistakes
+
+- Забывать PARTITION BY, когда среднее нужно считать отдельно по группам (например, по клиенту).
+

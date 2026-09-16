@@ -1,0 +1,33 @@
+---
+title: "Multiple JOINs"
+objectives:
+  - "Соединять более двух таблиц последовательными JOIN"
+---
+
+## Theory
+
+В одном запросе можно использовать несколько JOIN подряд, постепенно «подтягивая» данные из разных таблиц по цепочке связей.
+
+```sql
+SELECT ...
+FROM таблица1
+JOIN таблица2 ON ...
+JOIN таблица3 ON ...;
+```
+
+## Example
+
+```sql
+SELECT c.name, p.name AS product, pay.amount
+FROM orders o
+JOIN customers c ON o.customer_id = c.customer_id
+JOIN products p ON o.product_id = p.product_id
+LEFT JOIN payments pay ON o.order_id = pay.order_id;
+```
+
+Соединяет заказ с клиентом, товаром и (если есть) платежом — все четыре таблицы в одном запросе.
+
+## Common mistakes
+
+- Соединять таблицы не по внешнему ключу, а по «похожим» столбцам — это даёт неверные результаты.
+
