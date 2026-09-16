@@ -1,0 +1,414 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Auth / User
+// ---------------------------------------------------------------------------
+
+model User {
+  id            String    @id @default(cuid())
+  name          String
+  email         String    @unique
+  passwordHash  String?
+  emailVerified DateTime?
+  image         String?
+
+  level          Int @default(1)
+  xp             Int @default(0)
+  currentStreak  Int @default(0)
+  longestStreak  Int @default(0)
+  lastActivityAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  accounts Account[]
+  sessions Session[]
+
+  lessonProgress   UserLessonProgress[]
+  courseProgress   UserCourseProgress[]
+  exerciseProgress UserExerciseProgress[]
+  exerciseAttempts ExerciseAttempt[]
+  quizAttempts     QuizAttempt[]
+  projectSubmissions ProjectSubmission[]
+  achievements     UserAchievement[]
+
+  @@index([email])
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ---------------------------------------------------------------------------
+// Content hierarchy: Course -> Module -> Lesson -> Exercise / Quiz
+// Lesson theory content itself lives in /content (MDX); the DB stores
+// metadata, ordering, relations and everything needed to track progress.
+// ---------------------------------------------------------------------------
+
+enum CourseTrack {
+  EXCEL
+  SQL
+  POWER_BI
+  PYTHON
+  STATISTICS
+  BUSINESS_ANALYTICS
+}
+
+model Course {
+  id          String      @id @default(cuid())
+  slug        String      @unique
+  track       CourseTrack @unique
+  title       String
+  description String
+  order       Int         @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  modules  Module[]
+  projects Project[]
+  progress UserCourseProgress[]
+
+  @@index([order])
+}
+
+model Module {
+  id          String @id @default(cuid())
+  courseId    String
+  slug        String
+  title       String
+  description String
+  order       Int    @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  course  Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  lessons Lesson[]
+
+  @@unique([courseId, slug])
+  @@index([courseId, order])
+}
+
+model Lesson {
+  id          String @id @default(cuid())
+  moduleId    String
+  slug        String
+  title       String
+  description String
+  order       Int    @default(0)
+  /// Path to the MDX/content file, relative to /content, e.g. "excel/module-02/09-sum.mdx"
+  contentPath String
+  xpReward    Int    @default(10)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  module    Module     @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+  exercises Exercise[]
+  quiz      Quiz?
+  progress  UserLessonProgress[]
+
+  @@unique([moduleId, slug])
+  @@index([moduleId, order])
+}
+
+// ---------------------------------------------------------------------------
+// Exercises
+// ---------------------------------------------------------------------------
+
+enum ExerciseType {
+  MULTIPLE_CHOICE
+  TEXT_INPUT
+  FORMULA_INPUT
+  SQL_QUERY
+  TRUE_FALSE
+  MATCHING
+  ORDERING
+  DATA_ANALYSIS
+}
+
+enum Difficulty {
+  BEGINNER
+  INTERMEDIATE
+  ADVANCED
+}
+
+model Exercise {
+  id          String       @id @default(cuid())
+  lessonId    String
+  type        ExerciseType
+  title       String
+  description String
+  difficulty  Difficulty   @default(BEGINNER)
+  points      Int          @default(20)
+  order       Int          @default(0)
+
+  /// Type-specific rendering data (options, table seed, sql dataset id, etc). Never includes the answer.
+  data          Json
+  /// Server-side only. Never serialized to the client.
+  correctAnswer Json
+  explanation   String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lesson   Lesson             @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+  attempts ExerciseAttempt[]
+  progress UserExerciseProgress[]
+
+  @@index([lessonId, order])
+}
+
+model ExerciseAttempt {
+  id         String   @id @default(cuid())
+  userId     String
+  exerciseId String
+  answer     Json
+  isCorrect  Boolean
+  pointsAwarded Int   @default(0)
+  feedback   String?
+  createdAt  DateTime @default(now())
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  exercise Exercise @relation(fields: [exerciseId], references: [id], onDelete: Cascade)
+
+  @@index([userId, exerciseId])
+  @@index([exerciseId])
+}
+
+// ---------------------------------------------------------------------------
+// Quizzes
+// ---------------------------------------------------------------------------
+
+model Quiz {
+  id           String @id @default(cuid())
+  lessonId     String @unique
+  title        String
+  passingScore Int    @default(70)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  lesson    Lesson         @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+  questions QuizQuestion[]
+  attempts  QuizAttempt[]
+}
+
+model QuizQuestion {
+  id            String @id @default(cuid())
+  quizId        String
+  question      String
+  options       Json
+  /// Server-side only index/value of the correct option(s).
+  correctAnswer Json
+  explanation   String
+  order         Int    @default(0)
+
+  quiz Quiz @relation(fields: [quizId], references: [id], onDelete: Cascade)
+
+  @@index([quizId, order])
+}
+
+model QuizAttempt {
+  id        String   @id @default(cuid())
+  userId    String
+  quizId    String
+  answers   Json
+  score     Int
+  passed    Boolean
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  quiz Quiz @relation(fields: [quizId], references: [id], onDelete: Cascade)
+
+  @@index([userId, quizId])
+}
+
+// ---------------------------------------------------------------------------
+// Projects
+// ---------------------------------------------------------------------------
+
+model Project {
+  id                 String @id @default(cuid())
+  courseId           String
+  slug               String @unique
+  title              String
+  businessContext    String
+  datasetDescription String
+  goal               String
+  hints              Json
+  order              Int    @default(0)
+  xpReward           Int    @default(200)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  course      Course              @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  tasks       ProjectTask[]
+  submissions ProjectSubmission[]
+
+  @@index([courseId, order])
+}
+
+model ProjectTask {
+  id          String @id @default(cuid())
+  projectId   String
+  title       String
+  description String
+  order       Int    @default(0)
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([projectId, order])
+}
+
+enum SubmissionStatus {
+  SUBMITTED
+  REVIEWED
+  ACCEPTED
+  NEEDS_REVISION
+}
+
+model ProjectSubmission {
+  id         String           @id @default(cuid())
+  userId     String
+  projectId  String
+  summary    String
+  deliverableUrl String?
+  status     SubmissionStatus @default(SUBMITTED)
+  feedback   String?
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@index([userId, projectId])
+}
+
+// ---------------------------------------------------------------------------
+// Progress
+// ---------------------------------------------------------------------------
+
+model UserCourseProgress {
+  id             String   @id @default(cuid())
+  userId         String
+  courseId       String
+  percentComplete Int     @default(0)
+  completedAt    DateTime?
+  updatedAt      DateTime @updatedAt
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  course Course @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, courseId])
+}
+
+model UserLessonProgress {
+  id          String    @id @default(cuid())
+  userId      String
+  lessonId    String
+  completedAt DateTime?
+  updatedAt   DateTime  @updatedAt
+
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lesson Lesson @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, lessonId])
+}
+
+model UserExerciseProgress {
+  id          String    @id @default(cuid())
+  userId      String
+  exerciseId  String
+  completedAt DateTime?
+  bestScore   Int       @default(0)
+  attempts    Int       @default(0)
+  updatedAt   DateTime  @updatedAt
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  exercise Exercise @relation(fields: [exerciseId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, exerciseId])
+}
+
+// ---------------------------------------------------------------------------
+// Achievements
+// ---------------------------------------------------------------------------
+
+enum AchievementCode {
+  FIRST_LESSON
+  FIRST_EXERCISE
+  EXCEL_BEGINNER
+  SQL_BEGINNER
+  TEN_EXERCISES
+  FIFTY_EXERCISES
+  FIRST_PROJECT
+  SQL_MASTERY
+  SEVEN_DAY_STREAK
+}
+
+model Achievement {
+  id          String          @id @default(cuid())
+  code        AchievementCode @unique
+  title       String
+  description String
+  icon        String
+
+  users UserAchievement[]
+}
+
+model UserAchievement {
+  id            String   @id @default(cuid())
+  userId        String
+  achievementId String
+  unlockedAt    DateTime @default(now())
+
+  user        User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  achievement Achievement @relation(fields: [achievementId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, achievementId])
+}
