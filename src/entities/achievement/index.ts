@@ -6,4 +6,7 @@ export {
   type AchievementCode,
   type AchievementStats,
 } from "@/entities/achievement/model";
-export type { AchievementRepository } from "@/entities/achievement/repository";
+export type {
+  AchievementRepository,
+  UnlockedAchievement,
+} from "@/entities/achievement/repository";

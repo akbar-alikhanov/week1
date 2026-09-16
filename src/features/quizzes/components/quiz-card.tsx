@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import type { QuizSummary } from "@/features/lessons/application/get-lesson.use-case";
 import { submitQuizAction } from "@/features/quizzes/actions";
 import type { SubmitQuizResult } from "@/features/quizzes/application/submit-quiz.use-case";
+import { toastNewAchievements } from "@/features/achievements/components/toast-achievements";
 import { Button } from "@/shared/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/shared/ui/card";
 import { cn } from "@/shared/lib/cn";
@@ -29,6 +30,7 @@ export function QuizCard({ quiz }: { quiz: QuizSummary }) {
       if (response.data.xpAwarded > 0) {
         toast.success(`+${response.data.xpAwarded} XP — quiz passed!`);
       }
+      toastNewAchievements(response.data.newAchievements);
     });
   }
 

@@ -7,6 +7,7 @@ import { PrismaProgressRepository } from "@/infrastructure/repositories/prisma-p
 import { PrismaExerciseRepository } from "@/infrastructure/repositories/prisma-exercise.repository";
 import { PrismaExerciseAttemptRepository } from "@/infrastructure/repositories/prisma-exercise-attempt.repository";
 import { PrismaQuizRepository } from "@/infrastructure/repositories/prisma-quiz.repository";
+import { PrismaAchievementRepository } from "@/infrastructure/repositories/prisma-achievement.repository";
 import { BcryptPasswordHasher } from "@/infrastructure/services/bcrypt-password-hasher";
 import { PostgresSqlSandboxService } from "@/infrastructure/services/postgres-sql-sandbox.service";
 import { FsLessonContentReader } from "@/infrastructure/content/fs-lesson-content-reader";
@@ -19,6 +20,8 @@ import { CompleteLessonUseCase } from "@/features/lessons/application/complete-l
 import { SubmitExerciseUseCase } from "@/features/exercises/application/submit-exercise.use-case";
 import { ExecuteSqlExerciseUseCase } from "@/features/exercises/application/execute-sql-exercise.use-case";
 import { SubmitQuizUseCase } from "@/features/quizzes/application/submit-quiz.use-case";
+import { EvaluateAchievementsUseCase } from "@/features/achievements/application/evaluate-achievements.use-case";
+import { GetDashboardUseCase } from "@/features/progress/application/get-dashboard.use-case";
 
 /**
  * Composition root: the one place infrastructure implementations are wired
@@ -35,6 +38,7 @@ class Container {
   readonly exerciseRepository = new PrismaExerciseRepository(prisma);
   readonly exerciseAttemptRepository = new PrismaExerciseAttemptRepository(prisma);
   readonly quizRepository = new PrismaQuizRepository(prisma);
+  readonly achievementRepository = new PrismaAchievementRepository(prisma);
 
   readonly passwordHasher = new BcryptPasswordHasher();
   readonly lessonContentReader = new FsLessonContentReader();
@@ -85,6 +89,17 @@ class Container {
   readonly submitQuizUseCase = new SubmitQuizUseCase(
     this.quizRepository,
     this.userRepository,
+  );
+  readonly evaluateAchievementsUseCase = new EvaluateAchievementsUseCase(
+    this.achievementRepository,
+  );
+  readonly getDashboardUseCase = new GetDashboardUseCase(
+    this.userRepository,
+    this.courseRepository,
+    this.moduleRepository,
+    this.lessonRepository,
+    this.progressRepository,
+    this.achievementRepository,
   );
 }
 

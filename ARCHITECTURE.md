@@ -275,6 +275,29 @@ Business Analytics) to ship with "basic structure" only. Applied here as:
   yet. The course detail page renders these modules with a "Content coming
   soon" state instead of an empty/broken list.
 
+## Gamification wiring
+
+`EvaluateAchievementsUseCase` runs the pure `evaluateNewAchievements()`
+policy (Phase 2) against a stats snapshot (`AchievementRepository.getStats()`)
+and persists any newly-crossed thresholds. Rather than bury this inside
+`CompleteLessonUseCase`/`SubmitExerciseUseCase`/`SubmitQuizUseCase`, each of
+those three Server Actions calls it once, after its own use case succeeds,
+and folds the result into the action's response as `newAchievements` - so
+the client can toast "Achievement unlocked" without the completion use
+cases needing to know achievements exist. XP awarding stays inside each
+completion use case itself (not a separate step) since it is intrinsic to
+"this lesson/exercise/quiz was just completed," not a cross-cutting policy
+evaluated against a stats snapshot the way achievements are.
+
+`GetDashboardUseCase` aggregates: level/XP (via `levelForXp`/`xpIntoCurrentLevel`
+from the `User` entity), streaks, per-course progress
+(`ProgressRepository.getAllCourseProgress`), the 3 most recent unlocked
+achievements, and a "continue learning" pointer - the first incomplete
+lesson found by walking courses → modules → lessons in order. That walk is
+O(courses × modules × lessons) with one query per level; acceptable at
+today's content volume (~90 lessons) and revisited if the course catalog
+grows enough to matter.
+
 ## Testing strategy
 
 - **Domain** (`entities/**/*.test.ts`): pure unit tests, no mocks needed

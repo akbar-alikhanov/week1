@@ -9,6 +9,7 @@ import type { ExerciseProps } from "@/entities/exercise/model";
 import type { SubmittedAnswer } from "@/entities/exercise/types";
 import { submitExerciseAction } from "@/features/exercises/actions";
 import type { SubmitExerciseResult } from "@/features/exercises/application/submit-exercise.use-case";
+import { toastNewAchievements } from "@/features/achievements/components/toast-achievements";
 import { Badge } from "@/shared/ui/badge";
 import { Button } from "@/shared/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/shared/ui/card";
@@ -80,6 +81,7 @@ export function ExerciseCard({
             : `+${response.data.xpAwarded} XP`,
         );
       }
+      toastNewAchievements(response.data.newAchievements);
     });
   }
 

@@ -23,6 +23,7 @@ test("browsing a course and completing a lesson updates progress", async ({ page
   await expect(page.getByText("Строка формул").first()).toBeVisible();
 
   await page.getByRole("button", { name: "Mark lesson as complete" }).click();
+  await expect(page.getByText(/achievement unlocked: first lesson/i)).toBeVisible();
   // Completing a lesson with a next lesson available auto-advances to it.
   await expect(page).toHaveURL(
     /\/courses\/excel\/module-01-basics\/02-cells-rows-columns/,

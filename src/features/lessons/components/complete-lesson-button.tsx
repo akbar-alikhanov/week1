@@ -7,6 +7,7 @@ import { CheckCircle2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { completeLessonAction } from "@/features/lessons/actions";
+import { toastNewAchievements } from "@/features/achievements/components/toast-achievements";
 import { Button } from "@/shared/ui/button";
 
 export function CompleteLessonButton({
@@ -36,6 +37,7 @@ export function CompleteLessonButton({
             : `+${result.data.xpAwarded} XP`,
         );
       }
+      toastNewAchievements(result.data.newAchievements);
 
       router.refresh();
       if (nextLessonPath) {
