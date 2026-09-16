@@ -41,6 +41,31 @@ export class CourseProgress {
   }
 }
 
+export interface RoadmapCourseInput {
+  courseId: string;
+  percentComplete: number;
+}
+
+/**
+ * The roadmap unlock policy: the first course is always unlocked; every
+ * following course unlocks once the previous one reaches 100%. Pure so it
+ * can back both the visual roadmap and the actual access check in
+ * GetCourseUseCase/GetLessonUseCase from a single source of truth.
+ */
+export function computeUnlockedCourseIds(
+  coursesInOrder: RoadmapCourseInput[],
+): Set<string> {
+  const unlocked = new Set<string>();
+  let previousComplete = true;
+  for (const course of coursesInOrder) {
+    if (previousComplete) {
+      unlocked.add(course.courseId);
+    }
+    previousComplete = course.percentComplete === 100;
+  }
+  return unlocked;
+}
+
 export interface LessonProgressProps {
   lessonId: string;
   completedAt: Date | null;

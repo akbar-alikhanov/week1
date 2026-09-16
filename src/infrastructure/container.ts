@@ -20,7 +20,10 @@ import { CompleteLessonUseCase } from "@/features/lessons/application/complete-l
 import { SubmitExerciseUseCase } from "@/features/exercises/application/submit-exercise.use-case";
 import { ExecuteSqlExerciseUseCase } from "@/features/exercises/application/execute-sql-exercise.use-case";
 import { SubmitQuizUseCase } from "@/features/quizzes/application/submit-quiz.use-case";
+import { ListQuizzesUseCase } from "@/features/quizzes/application/list-quizzes.use-case";
+import { ListExercisesUseCase } from "@/features/exercises/application/list-exercises.use-case";
 import { EvaluateAchievementsUseCase } from "@/features/achievements/application/evaluate-achievements.use-case";
+import { ListAchievementsUseCase } from "@/features/achievements/application/list-achievements.use-case";
 import { GetDashboardUseCase } from "@/features/progress/application/get-dashboard.use-case";
 
 /**
@@ -90,7 +93,23 @@ class Container {
     this.quizRepository,
     this.userRepository,
   );
+  readonly listQuizzesUseCase = new ListQuizzesUseCase(
+    this.courseRepository,
+    this.moduleRepository,
+    this.lessonRepository,
+    this.quizRepository,
+  );
+  readonly listExercisesUseCase = new ListExercisesUseCase(
+    this.courseRepository,
+    this.moduleRepository,
+    this.lessonRepository,
+    this.exerciseRepository,
+    this.progressRepository,
+  );
   readonly evaluateAchievementsUseCase = new EvaluateAchievementsUseCase(
+    this.achievementRepository,
+  );
+  readonly listAchievementsUseCase = new ListAchievementsUseCase(
     this.achievementRepository,
   );
   readonly getDashboardUseCase = new GetDashboardUseCase(

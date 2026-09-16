@@ -3,20 +3,31 @@ import { CheckCircle2, Circle } from "lucide-react";
 
 import { auth } from "@/infrastructure/auth/auth";
 import { getContainer } from "@/infrastructure/container";
+import { ForbiddenError } from "@/shared/errors/app-error";
 import { Badge } from "@/shared/ui/badge";
 import { Progress } from "@/shared/ui/progress";
 import { Separator } from "@/shared/ui/separator";
 import { cn } from "@/shared/lib/cn";
+import { LockedCourseNotice } from "@/features/courses/components/locked-course-notice";
 
 export default async function CourseDetailPage({
   params,
 }: PageProps<"/courses/[courseSlug]">) {
   const { courseSlug } = await params;
   const session = await auth();
-  const course = await getContainer().getCourseUseCase.execute(
-    courseSlug,
-    session?.user?.id ?? null,
-  );
+
+  let course;
+  try {
+    course = await getContainer().getCourseUseCase.execute(
+      courseSlug,
+      session?.user?.id ?? null,
+    );
+  } catch (error) {
+    if (error instanceof ForbiddenError) {
+      return <LockedCourseNotice message={error.message} />;
+    }
+    throw error;
+  }
 
   return (
     <main className="flex flex-1 flex-col gap-6 p-6">

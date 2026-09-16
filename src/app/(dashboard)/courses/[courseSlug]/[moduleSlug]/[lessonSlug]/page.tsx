@@ -4,12 +4,13 @@ import { notFound } from "next/navigation";
 
 import { auth } from "@/infrastructure/auth/auth";
 import { getContainer } from "@/infrastructure/container";
-import { NotFoundError } from "@/shared/errors/app-error";
+import { ForbiddenError, NotFoundError } from "@/shared/errors/app-error";
 import { Badge } from "@/shared/ui/badge";
 import { CompleteLessonButton } from "@/features/lessons/components/complete-lesson-button";
 import { lessonMdxComponents } from "@/features/lessons/components/mdx-components";
 import { ExerciseCard } from "@/features/exercises/components/exercise-card";
 import { QuizCard } from "@/features/quizzes/components/quiz-card";
+import { LockedCourseNotice } from "@/features/courses/components/locked-course-notice";
 
 export default async function LessonPage({
   params,
@@ -28,6 +29,9 @@ export default async function LessonPage({
   } catch (error) {
     if (error instanceof NotFoundError) {
       notFound();
+    }
+    if (error instanceof ForbiddenError) {
+      return <LockedCourseNotice message={error.message} />;
     }
     throw error;
   }

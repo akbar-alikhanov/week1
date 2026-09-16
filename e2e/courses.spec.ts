@@ -14,7 +14,10 @@ test("browsing a course and completing a lesson updates progress", async ({ page
 
   await page.goto("/courses");
   await expect(page.getByRole("heading", { name: "Courses" })).toBeVisible();
-  await page.getByRole("link", { name: /^Excel/ }).click();
+  await page
+    .getByRole("main")
+    .getByRole("link", { name: /^Excel/ })
+    .click();
   await expect(page).toHaveURL(/\/courses\/excel/);
 
   await page.getByRole("link", { name: "Интерфейс Excel" }).click();

@@ -4,6 +4,7 @@ import type { CourseProgress, LessonProgress } from "@/entities/progress/model";
 export interface CourseProgressSummary {
   track: CourseTrack;
   courseId: string;
+  courseSlug: string;
   courseTitle: string;
   percentComplete: number;
 }

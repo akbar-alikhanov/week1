@@ -1,10 +1,12 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { CheckCircle2, Lock } from "lucide-react";
 
 import { auth } from "@/infrastructure/auth/auth";
 import { getContainer } from "@/infrastructure/container";
 import { Card, CardContent, CardHeader, CardTitle } from "@/shared/ui/card";
 import { Progress } from "@/shared/ui/progress";
+import { cn } from "@/shared/lib/cn";
 
 export const metadata: Metadata = {
   title: "Courses",
@@ -27,11 +29,23 @@ export default async function CoursesPage() {
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {courses.map((course) => (
-          <Link key={course.id} href={`/courses/${course.slug}`}>
-            <Card className="h-full transition-colors hover:border-primary/50">
+        {courses.map((course) => {
+          const card = (
+            <Card
+              className={cn(
+                "h-full transition-colors",
+                course.isUnlocked ? "hover:border-primary/50" : "opacity-60",
+              )}
+            >
               <CardHeader>
-                <CardTitle>{course.title}</CardTitle>
+                <div className="flex items-center justify-between gap-2">
+                  <CardTitle>{course.title}</CardTitle>
+                  {course.percentComplete === 100 ? (
+                    <CheckCircle2 className="size-4 shrink-0 text-success" />
+                  ) : !course.isUnlocked ? (
+                    <Lock className="size-4 shrink-0 text-muted-foreground" />
+                  ) : null}
+                </div>
               </CardHeader>
               <CardContent className="space-y-3">
                 <p className="text-sm text-muted-foreground line-clamp-2">
@@ -46,8 +60,16 @@ export default async function CoursesPage() {
                 </div>
               </CardContent>
             </Card>
-          </Link>
-        ))}
+          );
+
+          return course.isUnlocked ? (
+            <Link key={course.id} href={`/courses/${course.slug}`}>
+              {card}
+            </Link>
+          ) : (
+            <div key={course.id}>{card}</div>
+          );
+        })}
       </div>
     </main>
   );

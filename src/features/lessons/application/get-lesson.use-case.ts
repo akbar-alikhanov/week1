@@ -7,6 +7,7 @@ import type { QuizRepository } from "@/entities/quiz/repository";
 import { NotFoundError } from "@/shared/errors/app-error";
 import type { LessonContentReader } from "@/features/lessons/application/ports";
 import type { ExerciseProps } from "@/entities/exercise/model";
+import { assertCourseUnlocked } from "@/features/progress/application/course-lock";
 
 export interface QuizQuestionSummary {
   id: string;
@@ -79,6 +80,13 @@ export class GetLessonUseCase {
     if (!course) {
       throw new NotFoundError("Course", courseSlug);
     }
+
+    await assertCourseUnlocked(
+      course.id,
+      userId,
+      this.courseRepository,
+      this.progressRepository,
+    );
 
     const [content, isCompleted, next, exercises, quiz] = await Promise.all([
       this.contentReader.read(lesson.contentPath),

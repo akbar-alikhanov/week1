@@ -89,6 +89,7 @@ export class PrismaProgressRepository implements ProgressRepository {
     return courses.map((course) => ({
       track: course.track as CourseTrack,
       courseId: course.id,
+      courseSlug: course.slug,
       courseTitle: course.title,
       percentComplete: course.progress[0]?.percentComplete ?? 0,
     }));

@@ -1,16 +1,20 @@
 import { expect, test } from "@playwright/test";
 
+import { unlockSqlCourseForUser } from "./helpers/db";
+
 function uniqueEmail() {
   return `e2e-exercise-${Date.now()}-${Math.floor(Math.random() * 1e6)}@example.com`;
 }
 
 async function registerAndSignIn(page: import("@playwright/test").Page) {
+  const email = uniqueEmail();
   await page.goto("/register");
   await page.getByLabel("Name").fill("Exercise E2E User");
-  await page.getByLabel("Email").fill(uniqueEmail());
+  await page.getByLabel("Email").fill(email);
   await page.getByLabel("Password").fill("correct-horse-battery-staple");
   await page.getByRole("button", { name: "Create account" }).click();
   await expect(page).toHaveURL(/\/dashboard/);
+  return email;
 }
 
 test("solving a formula exercise grades correctly and awards XP", async ({ page }) => {
@@ -43,7 +47,8 @@ test("an incorrect multiple-choice answer shows feedback and allows retry", asyn
 test("solving a SQL exercise executes against the sandbox and grades correctly", async ({
   page,
 }) => {
-  await registerAndSignIn(page);
+  const email = await registerAndSignIn(page);
+  await unlockSqlCourseForUser(email);
 
   await page.goto("/courses/sql/module-01-sql-basics/06-select");
   await expect(page.getByRole("heading", { name: "SELECT" })).toBeVisible();

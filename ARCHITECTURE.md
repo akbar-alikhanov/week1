@@ -298,6 +298,36 @@ O(courses × modules × lessons) with one query per level; acceptable at
 today's content volume (~90 lessons) and revisited if the course catalog
 grows enough to matter.
 
+## Roadmap gating
+
+Spec §19 asks that "the next stage unlocks once its requirements are met,
+but the user can still see the whole roadmap." Read literally, that's an
+access-control rule, not just a visual one, so it's enforced at the use-case
+level, not only drawn differently on one page:
+
+- `computeUnlockedCourseIds()` (pure, `entities/progress/model.ts`) is the
+  single source of truth: the first course is always unlocked; each
+  following course unlocks once the previous one's `percentComplete` is 100. It takes an ordered list of `{courseId, percentComplete}` and has no
+  persistence or framework dependency, so it's unit-tested directly.
+- `assertCourseUnlocked()` (`features/progress/application/course-lock.ts`)
+  wraps that policy with the repository calls needed to evaluate it for a
+  given user, and throws `ForbiddenError` if the requested course isn't
+  unlocked yet. Both `GetCourseUseCase` and `GetLessonUseCase` call it
+  before returning any content, so a learner can't reach SQL (or any later
+  course) by guessing/typing a URL before finishing Excel - not just by not
+  seeing a link to it.
+- `ListCoursesUseCase` (used by both `/courses` and `/roadmap`) computes the
+  same `isUnlocked` flag per course so those pages can render a locked
+  state (dimmed card / lock icon, non-clickable) instead of a link, without
+  duplicating the unlock rule.
+- The `(dashboard)` course and lesson pages catch `ForbiddenError` and
+  render `LockedCourseNotice` (a small "complete the previous course"
+  card with a link back to `/roadmap`) instead of a raw error.
+
+A `userId` of `null` (no session) never triggers the check - every route
+that reaches these use cases already requires authentication via
+`proxy.ts`, so this is purely defensive.
+
 ## Testing strategy
 
 - **Domain** (`entities/**/*.test.ts`): pure unit tests, no mocks needed

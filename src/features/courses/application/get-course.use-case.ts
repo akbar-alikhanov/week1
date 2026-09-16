@@ -3,6 +3,7 @@ import type { ModuleRepository } from "@/entities/module/repository";
 import type { LessonRepository } from "@/entities/lesson/repository";
 import type { ProgressRepository } from "@/entities/progress/repository";
 import { NotFoundError } from "@/shared/errors/app-error";
+import { assertCourseUnlocked } from "@/features/progress/application/course-lock";
 
 export interface CourseDetailLesson {
   id: string;
@@ -41,6 +42,13 @@ export class GetCourseUseCase {
     if (!course) {
       throw new NotFoundError("Course", courseSlug);
     }
+
+    await assertCourseUnlocked(
+      course.id,
+      userId,
+      this.courseRepository,
+      this.progressRepository,
+    );
 
     const modules = await this.moduleRepository.findByCourseId(course.id);
     const modulesWithLessons = await Promise.all(

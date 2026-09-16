@@ -1,5 +1,6 @@
 import type { CourseRepository } from "@/entities/course/repository";
 import type { ProgressRepository } from "@/entities/progress/repository";
+import { computeUnlockedCourseIds } from "@/entities/progress/model";
 
 export interface CourseListItem {
   id: string;
@@ -8,6 +9,7 @@ export interface CourseListItem {
   title: string;
   description: string;
   percentComplete: number;
+  isUnlocked: boolean;
 }
 
 export class ListCoursesUseCase {
@@ -27,6 +29,13 @@ export class ListCoursesUseCase {
       }
     }
 
+    const unlocked = computeUnlockedCourseIds(
+      courses.map((course) => ({
+        courseId: course.id,
+        percentComplete: progressByCourseId.get(course.id) ?? 0,
+      })),
+    );
+
     return courses.map((course) => ({
       id: course.id,
       slug: course.slug,
@@ -34,6 +43,7 @@ export class ListCoursesUseCase {
       title: course.title,
       description: course.description,
       percentComplete: progressByCourseId.get(course.id) ?? 0,
+      isUnlocked: unlocked.has(course.id),
     }));
   }
 }
