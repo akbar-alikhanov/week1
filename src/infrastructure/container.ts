@@ -1,8 +1,17 @@
 import { prisma } from "@/infrastructure/database/prisma-client";
 import { PrismaUserRepository } from "@/infrastructure/repositories/prisma-user.repository";
+import { PrismaCourseRepository } from "@/infrastructure/repositories/prisma-course.repository";
+import { PrismaModuleRepository } from "@/infrastructure/repositories/prisma-module.repository";
+import { PrismaLessonRepository } from "@/infrastructure/repositories/prisma-lesson.repository";
+import { PrismaProgressRepository } from "@/infrastructure/repositories/prisma-progress.repository";
 import { BcryptPasswordHasher } from "@/infrastructure/services/bcrypt-password-hasher";
+import { FsLessonContentReader } from "@/infrastructure/content/fs-lesson-content-reader";
 import { RegisterUserUseCase } from "@/features/authentication/application/register-user.use-case";
 import { AuthenticateUserUseCase } from "@/features/authentication/application/authenticate-user.use-case";
+import { ListCoursesUseCase } from "@/features/courses/application/list-courses.use-case";
+import { GetCourseUseCase } from "@/features/courses/application/get-course.use-case";
+import { GetLessonUseCase } from "@/features/lessons/application/get-lesson.use-case";
+import { CompleteLessonUseCase } from "@/features/lessons/application/complete-lesson.use-case";
 
 /**
  * Composition root: the one place infrastructure implementations are wired
@@ -12,7 +21,13 @@ import { AuthenticateUserUseCase } from "@/features/authentication/application/a
  */
 class Container {
   readonly userRepository = new PrismaUserRepository(prisma);
+  readonly courseRepository = new PrismaCourseRepository(prisma);
+  readonly moduleRepository = new PrismaModuleRepository(prisma);
+  readonly lessonRepository = new PrismaLessonRepository(prisma);
+  readonly progressRepository = new PrismaProgressRepository(prisma);
+
   readonly passwordHasher = new BcryptPasswordHasher();
+  readonly lessonContentReader = new FsLessonContentReader();
 
   readonly registerUserUseCase = new RegisterUserUseCase(
     this.userRepository,
@@ -21,6 +36,30 @@ class Container {
   readonly authenticateUserUseCase = new AuthenticateUserUseCase(
     this.userRepository,
     this.passwordHasher,
+  );
+
+  readonly listCoursesUseCase = new ListCoursesUseCase(
+    this.courseRepository,
+    this.progressRepository,
+  );
+  readonly getCourseUseCase = new GetCourseUseCase(
+    this.courseRepository,
+    this.moduleRepository,
+    this.lessonRepository,
+    this.progressRepository,
+  );
+  readonly getLessonUseCase = new GetLessonUseCase(
+    this.lessonRepository,
+    this.moduleRepository,
+    this.courseRepository,
+    this.progressRepository,
+    this.lessonContentReader,
+  );
+  readonly completeLessonUseCase = new CompleteLessonUseCase(
+    this.lessonRepository,
+    this.moduleRepository,
+    this.progressRepository,
+    this.userRepository,
   );
 }
 

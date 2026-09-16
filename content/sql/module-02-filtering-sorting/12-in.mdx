@@ -1,0 +1,26 @@
+---
+title: "IN"
+objectives:
+  - "Фильтровать по списку значений через IN"
+---
+
+## Theory
+
+`IN` проверяет, входит ли значение столбца в заданный список — компактная альтернатива цепочке условий через OR.
+
+```sql
+SELECT * FROM таблица WHERE столбец IN (значение1, значение2, ...);
+```
+
+## Example
+
+```sql
+SELECT * FROM orders WHERE status IN ('pending', 'shipped');
+```
+
+Вернёт заказы, статус которых — «pending» ИЛИ «shipped».
+
+## Common mistakes
+
+- Писать WHERE status = 'pending' OR 'shipped' — это синтаксическая ошибка, нужно повторять столбец или использовать IN.
+

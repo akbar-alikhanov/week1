@@ -43,6 +43,8 @@ pnpm db:migrate   # apply Prisma migrations to DATABASE_URL
 pnpm db:seed      # seed demo user, courses, modules, lessons, exercises, projects
 ```
 
+The seed creates a demo account: `demo@dala.dev` / `password123`.
+
 The SQL Playground sandbox schema (its own tables: `customers`, `orders`,
 `products`, `payments`) is provisioned separately — see
 [ARCHITECTURE.md § SQL Sandbox](./ARCHITECTURE.md#sql-sandbox).

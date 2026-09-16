@@ -1,0 +1,26 @@
+---
+title: "FROM"
+objectives:
+  - "Указывать таблицу-источник в FROM"
+---
+
+## Theory
+
+`FROM` указывает, из какой таблицы (или нескольких таблиц, при JOIN) брать данные. Без FROM запрос SELECT не будет знать, откуда читать строки.
+
+```sql
+SELECT столбцы FROM таблица;
+```
+
+## Example
+
+```sql
+SELECT * FROM payments;
+```
+
+FROM payments указывает, что данные читаются из таблицы payments.
+
+## Common mistakes
+
+- Указывать неверное имя таблицы или опечатку — СУБД вернёт ошибку «relation does not exist».
+

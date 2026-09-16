@@ -1,0 +1,30 @@
+---
+title: "FULL JOIN"
+objectives:
+  - "Писать FULL JOIN"
+---
+
+## Theory
+
+`FULL JOIN` (FULL OUTER JOIN) возвращает все строки из обеих таблиц: там, где нет совпадения с одной из сторон, соответствующие столбцы заполняются NULL.
+
+```sql
+SELECT ...
+FROM таблица1
+FULL JOIN таблица2 ON таблица1.ключ = таблица2.ключ;
+```
+
+## Example
+
+```sql
+SELECT c.name, o.order_id
+FROM customers c
+FULL JOIN orders o ON c.customer_id = o.customer_id;
+```
+
+Вернёт клиентов без заказов И заказы без клиента (если такие есть), а также все совпадения.
+
+## Common mistakes
+
+- Использовать FULL JOIN там, где хватило бы INNER или LEFT — это усложняет чтение результата без необходимости.
+

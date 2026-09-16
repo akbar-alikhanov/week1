@@ -1,0 +1,26 @@
+---
+title: "Что такое SQL"
+objectives:
+  - "Объяснить, зачем нужен SQL"
+  - "Назвать основные категории SQL-команд"
+---
+
+## Theory
+
+SQL (Structured Query Language) — язык для работы с реляционными базами данных: чтения, изменения и структурирования данных. SQL делится на подъязыки: **DQL** (запросы, SELECT), **DML** (изменение данных: INSERT/UPDATE/DELETE), **DDL** (структура: CREATE/ALTER/DROP).
+
+В этом курсе мы фокусируемся на DQL — чтении и анализе данных с помощью SELECT.
+
+## Example
+
+```sql
+SELECT name, region
+FROM customers;
+```
+
+Простейший запрос: выбрать столбцы `name` и `region` из таблицы `customers`.
+
+## Common mistakes
+
+- Путать SQL (язык запросов) с конкретной СУБД (PostgreSQL, MySQL и т.д.) — SQL один, диалекты немного отличаются.
+

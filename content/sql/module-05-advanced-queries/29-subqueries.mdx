@@ -1,0 +1,30 @@
+---
+title: "Subqueries"
+objectives:
+  - "Писать подзапросы в WHERE и FROM"
+---
+
+## Theory
+
+Подзапрос (subquery) — это SELECT, вложенный внутрь другого запроса: в WHERE (для фильтрации по результату другого запроса), в FROM (как временная таблица) или в SELECT.
+
+```sql
+SELECT * FROM таблица
+WHERE столбец IN (SELECT столбец FROM другая_таблица WHERE условие);
+```
+
+## Example
+
+```sql
+SELECT name FROM customers
+WHERE customer_id IN (
+  SELECT customer_id FROM orders WHERE status = 'cancelled'
+);
+```
+
+Найдёт клиентов, у которых есть хотя бы один отменённый заказ.
+
+## Common mistakes
+
+- Использовать подзапрос там, где JOIN был бы проще и быстрее для чтения.
+

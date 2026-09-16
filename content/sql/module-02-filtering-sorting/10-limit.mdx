@@ -1,0 +1,26 @@
+---
+title: "LIMIT"
+objectives:
+  - "Ограничивать количество строк результата"
+---
+
+## Theory
+
+`LIMIT` ограничивает количество строк, возвращаемых запросом — полезно для просмотра «топ-N» записей вместе с ORDER BY.
+
+```sql
+SELECT столбцы FROM таблица ORDER BY столбец DESC LIMIT N;
+```
+
+## Example
+
+```sql
+SELECT name, price FROM products ORDER BY price DESC LIMIT 3;
+```
+
+Вернёт три самых дорогих товара.
+
+## Common mistakes
+
+- Использовать LIMIT без ORDER BY, когда важен порядок — тогда «первые N строк» не гарантированы.
+

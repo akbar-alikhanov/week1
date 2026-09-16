@@ -1,0 +1,29 @@
+---
+title: "ROW_NUMBER"
+objectives:
+  - "Нумеровать строки с ROW_NUMBER"
+  - "Использовать PARTITION BY"
+---
+
+## Theory
+
+`ROW_NUMBER()` — оконная функция, присваивающая уникальный порядковый номер каждой строке в пределах окна, заданного `OVER (...)`. `PARTITION BY` разбивает нумерацию на независимые группы.
+
+```sql
+ROW_NUMBER() OVER (PARTITION BY столбец ORDER BY другой_столбец)
+```
+
+## Example
+
+```sql
+SELECT name, price,
+  ROW_NUMBER() OVER (PARTITION BY category ORDER BY price DESC) AS rank_in_category
+FROM products;
+```
+
+Пронумерует товары от самого дорогого к дешёвому отдельно внутри каждой категории.
+
+## Common mistakes
+
+- Забывать ORDER BY внутри OVER — тогда порядок нумерации не определён.
+

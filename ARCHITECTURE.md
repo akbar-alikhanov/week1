@@ -207,6 +207,49 @@ false })` to establish the session before the client redirects - this keeps
 "submit the form" and "you're signed in" a single request/response round
 trip instead of a second client-side sign-in call.
 
+## Content authoring & seeding
+
+Lesson content is authored once as structured TypeScript data
+(`prisma/content-source/**`, one file per module: `theory`, `example`,
+`commonMistakes`, one or more `exercise`(s) with the answer key, and `quiz`
+questions) rather than as hand-written `.mdx` files. `prisma/seed.ts` then:
+
+1. Writes each lesson's theory as a real `.mdx` file under `content/<course
+   slug>/<module slug>/<lesson slug>.mdx` (frontmatter `objectives`, body
+   sections `## Theory` / `## Example` / `## Common mistakes`).
+2. Upserts `Course` → `Module` → `Lesson` (with `contentPath` pointing at the
+   file just written) → `Exercise` (server-side `correctAnswer` included) →
+   `Quiz`/`QuizQuestion`.
+
+This keeps the "content lives in files, DB holds metadata" rule from spec §23
+while letting content be authored as reviewable, type-checked data instead of
+~90 separate hand-edited files. The generated `.mdx` files are real,
+independently readable/editable content - the TS source is just how they get
+produced and kept in sync with their DB rows; editing either the source data
+or a generated `.mdx` file directly both work, but only the source is
+re-seedable.
+
+**Content depth tiering.** Spec §35 asks to fully implement Excel first
+(all 8 modules / 54 lessons); §36 asks for full depth on SQL's first modules
+with real datasets (≥2 theory examples, ≥3 exercises, ≥3 quiz questions per
+lesson) and §34 allows the remaining courses (Power BI, Python, Statistics,
+Business Analytics) to ship with "basic structure" only. Applied here as:
+
+- **Excel** - all 54 lessons implemented with real theory, a worked example,
+  one graded exercise and a 1-2 question quiz each.
+- **SQL modules 1-2** (SELECT/WHERE fundamentals, filtering & sorting) - the
+  heavier tier: 2+ worked examples, 3 graded exercises, 3 quiz questions per
+  lesson, against a shared 4-table dataset (`customers`, `products`,
+  `orders`, `payments`) that doubles as the SQL Playground's sandbox dataset.
+- **SQL modules 3-6** (aggregation, JOINs, subqueries/CTEs, window
+  functions) - one real exercise and 1-2 quiz questions per lesson; still
+  real, runnable SQL against the same dataset, just less repetition per
+  concept.
+- **Power BI / Python / Statistics / Business Analytics** - `Course` and
+  `Module` rows only (topics grouped from the spec's flat lists), no lessons
+  yet. The course detail page renders these modules with a "Content coming
+  soon" state instead of an empty/broken list.
+
 ## Testing strategy
 
 - **Domain** (`entities/**/*.test.ts`): pure unit tests, no mocks needed

@@ -1,0 +1,28 @@
+---
+title: "LEAD"
+objectives:
+  - "Сравнивать строку со следующей через LEAD"
+---
+
+## Theory
+
+`LEAD(столбец)` — зеркало LAG: возвращает значение из **следующей** строки в пределах окна.
+
+```sql
+LEAD(столбец) OVER (ORDER BY столбец_сортировки)
+```
+
+## Example
+
+```sql
+SELECT order_date, amount,
+  LEAD(amount) OVER (ORDER BY order_date) AS next_amount
+FROM payments;
+```
+
+Покажет сумму следующего платежа рядом с текущим.
+
+## Common mistakes
+
+- Путать направление LAG (назад) и LEAD (вперёд).
+

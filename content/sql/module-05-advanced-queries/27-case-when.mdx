@@ -1,0 +1,32 @@
+---
+title: "CASE WHEN"
+objectives:
+  - "Строить условные выражения через CASE WHEN"
+---
+
+## Theory
+
+`CASE WHEN` — аналог ЕСЛИ из Excel внутри SQL: проверяет условия по порядку и возвращает соответствующее значение.
+
+```sql
+CASE
+  WHEN условие1 THEN значение1
+  WHEN условие2 THEN значение2
+  ELSE значение_по_умолчанию
+END
+```
+
+## Example
+
+```sql
+SELECT name,
+  CASE WHEN price > 1000 THEN 'Дорогой' ELSE 'Доступный' END AS price_tier
+FROM products;
+```
+
+Присвоит каждому товару категорию по цене.
+
+## Common mistakes
+
+- Забывать END в конце выражения CASE.
+

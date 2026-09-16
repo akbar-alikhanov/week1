@@ -1,0 +1,26 @@
+---
+title: "IS NULL"
+objectives:
+  - "Проверять пустые значения через IS NULL/IS NOT NULL"
+---
+
+## Theory
+
+`NULL` означает «значение неизвестно/отсутствует». Сравнение `= NULL` не работает — для проверки нужен специальный оператор `IS NULL` (или `IS NOT NULL` для обратной проверки).
+
+```sql
+SELECT * FROM таблица WHERE столбец IS NULL;
+```
+
+## Example
+
+```sql
+SELECT order_id FROM payments WHERE paid_at IS NULL;
+```
+
+Вернёт платежи, у которых ещё не заполнена дата оплаты.
+
+## Common mistakes
+
+- Писать WHERE column = NULL вместо WHERE column IS NULL — это не вызовет ошибку, но всегда вернёт пустой результат.
+
