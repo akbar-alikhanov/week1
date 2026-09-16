@@ -439,3 +439,15 @@ means here:
   policy, so the shadcn-style components under `src/shared/ui` are
   hand-written directly against the same Radix primitives + CVA pattern the
   shadcn CLI generates, rather than using the CLI.
+- **Migrating/seeding on Vercel**: rather than requiring a manual
+  `prisma migrate deploy`/seed step run from a separate machine against the
+  production database (the more conventional setup), the `vercel-build`
+  script runs `prisma migrate deploy && tsx prisma/seed.ts` before
+  `next build` on every deploy. This trades a small amount of build time for
+  removing an entire manual step from the deploy process; it's safe because
+  both operations are idempotent (migrate deploy no-ops once applied, and
+  the seed only upserts), and appropriate for this app's content-as-code
+  model where "deploy" and "the content is up to date" should be the same
+  event. A team with a stricter migration-review process would instead gate
+  `prisma migrate deploy` behind a manual or CI-approved step - see
+  `vercel-build` in `package.json` if you need to split it back out.

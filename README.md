@@ -100,27 +100,27 @@ Prisma Postgres, ...).
 1. **Provision two databases**: the main app database and a separate sandbox
    database for the SQL Playground (see § SQL Sandbox above) — a second
    small Postgres instance/branch is enough, it holds only four teaching
-   tables.
-2. **Set environment variables** in the Vercel project settings: all of
-   `DATABASE_URL`, `SANDBOX_DATABASE_URL`, `SANDBOX_READONLY_DATABASE_URL`,
-   `SANDBOX_READER_PASSWORD`, `AUTH_SECRET`, and `NEXTAUTH_URL` (the
-   deployment's public URL).
-3. **Build**: `pnpm build` runs `next build`. `prisma generate` runs
-   automatically via the `postinstall` script (the generated Prisma Client
-   under `src/generated/prisma` is git-ignored, so this has to happen on
-   every install, including Vercel's) — no extra Vercel build-command
-   configuration is needed.
-4. **Migrate and seed** as a one-off step against the production databases
-   before or right after the first deploy (from a machine with the
-   production env vars, or a Vercel deploy hook / CI job):
-   ```bash
-   pnpm db:migrate        # or `prisma migrate deploy` for a non-interactive apply
-   pnpm db:seed
-   pnpm db:seed:sandbox
-   ```
-   Re-run `pnpm db:migrate`/`prisma migrate deploy` on later deploys that add
-   migrations; re-running `db:seed`/`db:seed:sandbox` is optional (both are
-   idempotent) but only needed when content changes.
+   tables. (The sandbox DB is only needed for the SQL Playground; the rest
+   of the app works without it.)
+2. **Set environment variables** in the Vercel project settings: at minimum
+   `DATABASE_URL`, `AUTH_SECRET`, and `NEXTAUTH_URL` (the deployment's public
+   URL) — that's enough for auth, courses, exercises, projects, etc. to
+   work. Add `SANDBOX_DATABASE_URL`, `SANDBOX_READONLY_DATABASE_URL`, and
+   `SANDBOX_READER_PASSWORD` too once you provision the sandbox DB, to also
+   enable the SQL Playground.
+3. **Build**: Vercel runs the `vercel-build` script (it takes precedence
+   over `build` automatically), which chains
+   `prisma migrate deploy && tsx prisma/seed.ts && next build` — so every
+   deploy applies pending migrations and re-seeds content on its own, no
+   manual migrate/seed step required. `prisma generate` runs first via the
+   `postinstall` script (the generated Prisma Client under
+   `src/generated/prisma` is git-ignored, so this has to happen on every
+   install, including Vercel's). Both `migrate deploy` and the seed are
+   idempotent, so re-running them on every build is safe and cheap once
+   there's nothing new to apply.
+4. If you add the sandbox DB later, run `pnpm db:seed:sandbox` once against
+   it from a machine with network access to it (it's not part of the
+   automatic Vercel build, since it needs its own separate credentials).
 
 ## Documentation
 
