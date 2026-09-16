@@ -174,6 +174,15 @@ sliding-window rate limiter (`src/infrastructure/services/in-memory-rate-limiter
 production deployment should swap it for a shared store (Redis/Upstash)
 behind the same interface.
 
+`/playground` (the standalone SQL Playground page, spec §14) is a thin
+client shell (`SqlPlayground`) over the same `SqlEditor`, `QueryResultTable`
+and `runSqlQueryAction` already built for lesson `SQL_QUERY` exercises - it
+just runs a query for live preview with no grading, and shows a static
+sidebar of the sandbox's four tables/columns. It is intentionally not
+gated by the roadmap unlock policy (unlike course/lesson pages): it is a
+practice tool under "Practice" in the nav, not a course step, so trying
+SQL there ahead of finishing Excel is allowed.
+
 The Monaco editor used for `SQL_QUERY` answers is bundled through Next.js
 (`loader.config({ monaco })` from a direct `monaco-editor` import) rather
 than fetched from `@monaco-editor/react`'s default CDN loader, and loaded

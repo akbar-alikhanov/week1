@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 
-import { ComingSoon } from "@/shared/components/coming-soon";
+import { SqlPlayground } from "@/features/exercises/components/sql-playground";
 
 export const metadata: Metadata = {
   title: "SQL Playground",
@@ -9,9 +9,15 @@ export const metadata: Metadata = {
 
 export default function PlaygroundPage() {
   return (
-    <ComingSoon
-      title="SQL Playground"
-      description="A free-form SQL editor against the sandbox dataset is coming in the next update. In the meantime, try the SQL exercises inside any SQL lesson."
-    />
+    <div className="flex flex-1 flex-col">
+      <div className="border-b border-border px-6 py-4">
+        <h1 className="text-2xl font-semibold tracking-tight">SQL Playground</h1>
+        <p className="text-muted-foreground">
+          Run read-only SELECT queries against the sandbox dataset. Writes and schema
+          changes are blocked.
+        </p>
+      </div>
+      <SqlPlayground />
+    </div>
   );
 }

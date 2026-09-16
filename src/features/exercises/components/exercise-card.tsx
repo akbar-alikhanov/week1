@@ -23,6 +23,7 @@ import {
 } from "@/shared/ui/select";
 import { cn } from "@/shared/lib/cn";
 import { SpreadsheetTablePreview } from "@/features/exercises/components/spreadsheet-table";
+import { QueryResultTable } from "@/features/exercises/components/query-result-table";
 
 const SqlEditor = dynamic(
   () => import("@/features/exercises/components/sql-editor").then((mod) => mod.SqlEditor),
@@ -328,45 +329,6 @@ function ExerciseInput({
   }
 
   return null;
-}
-
-function QueryResultTable({
-  result,
-}: {
-  result: { columns: string[]; rows: Record<string, unknown>[] };
-}) {
-  if (result.rows.length === 0) {
-    return <p className="text-sm text-muted-foreground">Query returned no rows.</p>;
-  }
-  return (
-    <div className="overflow-x-auto rounded-md border border-border">
-      <table className="w-full border-collapse text-sm">
-        <thead>
-          <tr className="bg-muted/60">
-            {result.columns.map((col) => (
-              <th
-                key={col}
-                className="border-b border-border p-1.5 text-left font-medium"
-              >
-                {col}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {result.rows.slice(0, 20).map((row, i) => (
-            <tr key={i}>
-              {result.columns.map((col) => (
-                <td key={col} className="border-b border-border p-1.5">
-                  {String(row[col] ?? "")}
-                </td>
-              ))}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
 }
 
 function isComplete(answer: SubmittedAnswer): boolean {
