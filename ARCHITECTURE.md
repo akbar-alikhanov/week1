@@ -376,6 +376,26 @@ from Phase 2; Phase 9 wires them up end to end:
   the same structure filled in at a lighter level of detail, consistent with
   those courses' stub-module status.
 
+## Career Mode
+
+Unlike courses/exercises/projects, Career Mode (§ "basic structure ok" per
+spec) has no progress tracking, grading, or XP - it's reference content plus
+a personal tool. That changes what "don't hardcode content in components"
+means here:
+
+- Interview questions and business cases (`features/career/content/interview-content.ts`)
+  are plain TS data, not routed through Prisma/MDX like lesson content -
+  there's nothing to seed, migrate, or query per-user, so a database round
+  trip would add infrastructure without adding value. Content still lives
+  outside the JSX (`QuestionCard`, `/career/page.tsx`) so it can be edited or
+  extended without touching rendering code.
+- The **resume builder** (`/career/resume`) is a client-only tool: form
+  state persists to the browser's `localStorage` (never sent to the server),
+  since a resume draft is a personal scratchpad, not shared or graded data
+  that needs a `User`-owned DB row. "Export" is a print-friendly view opened
+  via `window.print()`, avoiding a PDF-generation dependency for an MVP
+  feature the spec marks as "basic structure ok."
+
 ## Testing strategy
 
 - **Domain** (`entities/**/*.test.ts`): pure unit tests, no mocks needed
