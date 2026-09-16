@@ -8,6 +8,8 @@ import { NotFoundError } from "@/shared/errors/app-error";
 import { Badge } from "@/shared/ui/badge";
 import { CompleteLessonButton } from "@/features/lessons/components/complete-lesson-button";
 import { lessonMdxComponents } from "@/features/lessons/components/mdx-components";
+import { ExerciseCard } from "@/features/exercises/components/exercise-card";
+import { QuizCard } from "@/features/quizzes/components/quiz-card";
 
 export default async function LessonPage({
   params,
@@ -59,6 +61,22 @@ export default async function LessonPage({
       <article>
         <MDXRemote source={lesson.markdown} components={lessonMdxComponents} />
       </article>
+
+      {lesson.exercises.length > 0 ? (
+        <div className="space-y-4 border-t border-border pt-6">
+          <h2 className="text-lg font-semibold tracking-tight">🧪 Practice</h2>
+          {lesson.exercises.map((exercise, index) => (
+            <ExerciseCard key={exercise.id} exercise={exercise} index={index} />
+          ))}
+        </div>
+      ) : null}
+
+      {lesson.quiz ? (
+        <div className="space-y-4 border-t border-border pt-6">
+          <h2 className="text-lg font-semibold tracking-tight">Quiz</h2>
+          <QuizCard quiz={lesson.quiz} />
+        </div>
+      ) : null}
 
       <div className="border-t border-border pt-6">
         <CompleteLessonButton

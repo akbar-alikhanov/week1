@@ -154,8 +154,33 @@ production data. The chosen mechanism:
   `SQL_QUERY` exercises: it runs the learner's query and the exercise's
   `referenceQuery`, and compares the resulting rows.
 
-Full implementation lands in the SQL Playground phase; this section records
-the decision so later phases don't re-litigate it.
+`PostgresSqlSandboxService` (`src/infrastructure/services/postgres-sql-sandbox.service.ts`)
+implements all four layers: it rejects anything but a single `SELECT`/`WITH`
+statement, checks the forbidden-keyword regex, wraps the query as
+`SELECT * FROM (<query>) AS sandboxed_query LIMIT 500` inside a
+`BEGIN TRANSACTION READ ONLY` block with a 5s `statement_timeout`, and always
+connects as the `sandbox_reader` role (`SANDBOX_READONLY_DATABASE_URL`),
+provisioned by `pnpm db:seed:sandbox` with `SELECT`-only grants. `SubmitExerciseUseCase`
+grades `SQL_QUERY` exercises by running both the learner's query and the
+exercise's `referenceQuery` through this same service and comparing the
+result rows (order-insensitive: rows are normalized and sorted before
+comparison, since an ungrouped `SELECT` doesn't guarantee row order without
+an explicit `ORDER BY`). `ExecuteSqlExerciseUseCase` runs a query with no
+grading - used for the "Run" preview both on lesson `SQL_QUERY` exercises
+and the standalone SQL Playground (a later phase, reusing this same
+service and sandbox dataset). Both entry points share an in-memory
+sliding-window rate limiter (`src/infrastructure/services/in-memory-rate-limiter.ts`,
+20 requests/minute per user) as required by spec §29; a multi-instance
+production deployment should swap it for a shared store (Redis/Upstash)
+behind the same interface.
+
+The Monaco editor used for `SQL_QUERY` answers is bundled through Next.js
+(`loader.config({ monaco })` from a direct `monaco-editor` import) rather
+than fetched from `@monaco-editor/react`'s default CDN loader, and loaded
+via `next/dynamic(..., { ssr: false })` since `monaco-editor` touches
+`window` at import time and cannot be evaluated during SSR. This also makes
+the editor work in network-restricted environments and removes a runtime
+dependency on a third-party CDN being reachable.
 
 ## Content architecture
 
@@ -215,7 +240,7 @@ Lesson content is authored once as structured TypeScript data
 questions) rather than as hand-written `.mdx` files. `prisma/seed.ts` then:
 
 1. Writes each lesson's theory as a real `.mdx` file under `content/<course
-   slug>/<module slug>/<lesson slug>.mdx` (frontmatter `objectives`, body
+slug>/<module slug>/<lesson slug>.mdx` (frontmatter `objectives`, body
    sections `## Theory` / `## Example` / `## Common mistakes`).
 2. Upserts `Course` → `Module` → `Lesson` (with `contentPath` pointing at the
    file just written) → `Exercise` (server-side `correctAnswer` included) →

@@ -18,5 +18,6 @@ export interface ProgressRepository {
   getAllCourseProgress(userId: string): Promise<CourseProgressSummary[]>;
 
   markExerciseCompleted(userId: string, exerciseId: string, score: number): Promise<void>;
+  isExerciseCompleted(userId: string, exerciseId: string): Promise<boolean>;
   countCompletedExercises(userId: string): Promise<number>;
 }

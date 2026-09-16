@@ -2,8 +2,27 @@ import type { LessonRepository } from "@/entities/lesson/repository";
 import type { ModuleRepository } from "@/entities/module/repository";
 import type { CourseRepository } from "@/entities/course/repository";
 import type { ProgressRepository } from "@/entities/progress/repository";
+import type { ExerciseRepository } from "@/entities/exercise/repository";
+import type { QuizRepository } from "@/entities/quiz/repository";
 import { NotFoundError } from "@/shared/errors/app-error";
 import type { LessonContentReader } from "@/features/lessons/application/ports";
+import type { ExerciseProps } from "@/entities/exercise/model";
+
+export interface QuizQuestionSummary {
+  id: string;
+  question: string;
+  options: string[];
+  explanation: string;
+  order: number;
+}
+
+export interface QuizSummary {
+  id: string;
+  lessonId: string;
+  title: string;
+  passingScore: number;
+  questions: QuizQuestionSummary[];
+}
 
 export interface LessonDetail {
   id: string;
@@ -21,6 +40,8 @@ export interface LessonDetail {
   moduleIndex: number;
   lessonIndex: number;
   nextLessonPath: string | null;
+  exercises: ExerciseProps[];
+  quiz: QuizSummary | null;
 }
 
 export class GetLessonUseCase {
@@ -30,6 +51,8 @@ export class GetLessonUseCase {
     private readonly courseRepository: CourseRepository,
     private readonly progressRepository: ProgressRepository,
     private readonly contentReader: LessonContentReader,
+    private readonly exerciseRepository: ExerciseRepository,
+    private readonly quizRepository: QuizRepository,
   ) {}
 
   async execute(
@@ -57,12 +80,14 @@ export class GetLessonUseCase {
       throw new NotFoundError("Course", courseSlug);
     }
 
-    const [content, isCompleted, next] = await Promise.all([
+    const [content, isCompleted, next, exercises, quiz] = await Promise.all([
       this.contentReader.read(lesson.contentPath),
       userId
         ? this.progressRepository.isLessonCompleted(userId, lesson.id)
         : Promise.resolve(false),
       this.lessonRepository.findNext(lesson.id),
+      this.exerciseRepository.findByLessonId(lesson.id),
+      this.quizRepository.findByLessonId(lesson.id),
     ]);
 
     let nextLessonPath: string | null = null;
@@ -89,6 +114,16 @@ export class GetLessonUseCase {
       moduleIndex: courseModule.order,
       lessonIndex: lesson.order,
       nextLessonPath,
+      exercises: exercises.map((exercise) => exercise.toProps()),
+      quiz: quiz
+        ? {
+            id: quiz.id,
+            lessonId: quiz.lessonId,
+            title: quiz.title,
+            passingScore: quiz.passingScore,
+            questions: quiz.questions.map((question) => question.toProps()),
+          }
+        : null,
     };
   }
 }

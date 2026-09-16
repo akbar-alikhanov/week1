@@ -82,6 +82,9 @@ class FakeProgressRepository implements ProgressRepository {
     return [];
   }
   async markExerciseCompleted() {}
+  async isExerciseCompleted() {
+    return false;
+  }
   async countCompletedExercises() {
     return 0;
   }

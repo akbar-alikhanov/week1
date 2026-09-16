@@ -119,6 +119,14 @@ export class PrismaProgressRepository implements ProgressRepository {
     });
   }
 
+  async isExerciseCompleted(userId: string, exerciseId: string): Promise<boolean> {
+    const record = await this.db.userExerciseProgress.findUnique({
+      where: { userId_exerciseId: { userId, exerciseId } },
+      select: { completedAt: true },
+    });
+    return !!record?.completedAt;
+  }
+
   async countCompletedExercises(userId: string): Promise<number> {
     return this.db.userExerciseProgress.count({
       where: { userId, completedAt: { not: null } },
