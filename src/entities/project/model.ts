@@ -40,6 +40,8 @@ export interface ProjectProps {
   businessContext: string;
   datasetDescription: string;
   goal: string;
+  deliverables: string[];
+  evaluationCriteria: string[];
   hints: string[];
   order: number;
   xpReward: number;
@@ -76,6 +78,12 @@ export class Project {
   }
   get goal() {
     return this.props.goal;
+  }
+  get deliverables() {
+    return this.props.deliverables;
+  }
+  get evaluationCriteria() {
+    return this.props.evaluationCriteria;
   }
   get hints() {
     return this.props.hints;

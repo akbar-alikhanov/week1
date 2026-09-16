@@ -8,6 +8,8 @@ import { PrismaExerciseRepository } from "@/infrastructure/repositories/prisma-e
 import { PrismaExerciseAttemptRepository } from "@/infrastructure/repositories/prisma-exercise-attempt.repository";
 import { PrismaQuizRepository } from "@/infrastructure/repositories/prisma-quiz.repository";
 import { PrismaAchievementRepository } from "@/infrastructure/repositories/prisma-achievement.repository";
+import { PrismaProjectRepository } from "@/infrastructure/repositories/prisma-project.repository";
+import { PrismaProjectSubmissionRepository } from "@/infrastructure/repositories/prisma-project-submission.repository";
 import { BcryptPasswordHasher } from "@/infrastructure/services/bcrypt-password-hasher";
 import { PostgresSqlSandboxService } from "@/infrastructure/services/postgres-sql-sandbox.service";
 import { FsLessonContentReader } from "@/infrastructure/content/fs-lesson-content-reader";
@@ -25,6 +27,9 @@ import { ListExercisesUseCase } from "@/features/exercises/application/list-exer
 import { EvaluateAchievementsUseCase } from "@/features/achievements/application/evaluate-achievements.use-case";
 import { ListAchievementsUseCase } from "@/features/achievements/application/list-achievements.use-case";
 import { GetDashboardUseCase } from "@/features/progress/application/get-dashboard.use-case";
+import { ListProjectsUseCase } from "@/features/projects/application/list-projects.use-case";
+import { GetProjectUseCase } from "@/features/projects/application/get-project.use-case";
+import { SubmitProjectUseCase } from "@/features/projects/application/submit-project.use-case";
 
 /**
  * Composition root: the one place infrastructure implementations are wired
@@ -42,6 +47,8 @@ class Container {
   readonly exerciseAttemptRepository = new PrismaExerciseAttemptRepository(prisma);
   readonly quizRepository = new PrismaQuizRepository(prisma);
   readonly achievementRepository = new PrismaAchievementRepository(prisma);
+  readonly projectRepository = new PrismaProjectRepository(prisma);
+  readonly projectSubmissionRepository = new PrismaProjectSubmissionRepository(prisma);
 
   readonly passwordHasher = new BcryptPasswordHasher();
   readonly lessonContentReader = new FsLessonContentReader();
@@ -119,6 +126,25 @@ class Container {
     this.lessonRepository,
     this.progressRepository,
     this.achievementRepository,
+  );
+  readonly listProjectsUseCase = new ListProjectsUseCase(
+    this.projectRepository,
+    this.projectSubmissionRepository,
+    this.courseRepository,
+    this.progressRepository,
+  );
+  readonly getProjectUseCase = new GetProjectUseCase(
+    this.projectRepository,
+    this.projectSubmissionRepository,
+    this.courseRepository,
+    this.progressRepository,
+  );
+  readonly submitProjectUseCase = new SubmitProjectUseCase(
+    this.projectRepository,
+    this.projectSubmissionRepository,
+    this.courseRepository,
+    this.progressRepository,
+    this.userRepository,
   );
 }
 

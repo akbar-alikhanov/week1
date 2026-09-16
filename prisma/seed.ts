@@ -9,7 +9,12 @@ import type { AchievementCode } from "@/generated/prisma/enums";
 import { excelCourse } from "@/../prisma/content-source/excel";
 import { sqlCourse } from "@/../prisma/content-source/sql";
 import { stubCourses } from "@/../prisma/content-source/stub-courses";
-import type { CourseSeed, LessonSeed } from "@/../prisma/content-source/types";
+import { projects } from "@/../prisma/content-source/projects";
+import type {
+  CourseSeed,
+  LessonSeed,
+  ProjectSeed,
+} from "@/../prisma/content-source/types";
 
 const CONTENT_ROOT = path.join(process.cwd(), "content");
 
@@ -171,6 +176,44 @@ async function seedCourse(course: CourseSeed) {
   }
 }
 
+async function seedProject(project: ProjectSeed, order: number) {
+  const course = await prisma.course.findUnique({ where: { slug: project.courseSlug } });
+  if (!course) {
+    throw new Error(
+      `Cannot seed project "${project.slug}": course "${project.courseSlug}" not found.`,
+    );
+  }
+
+  const data = {
+    courseId: course.id,
+    title: project.title,
+    businessContext: project.businessContext,
+    datasetDescription: project.datasetDescription,
+    goal: project.goal,
+    deliverables: project.deliverables,
+    evaluationCriteria: project.evaluationCriteria,
+    hints: project.hints,
+    order,
+    xpReward: project.xpReward ?? 200,
+  };
+
+  const dbProject = await prisma.project.upsert({
+    where: { slug: project.slug },
+    create: { slug: project.slug, ...data },
+    update: data,
+  });
+
+  await prisma.projectTask.deleteMany({ where: { projectId: dbProject.id } });
+  await prisma.projectTask.createMany({
+    data: project.tasks.map((task, taskOrder) => ({
+      projectId: dbProject.id,
+      title: task.title,
+      description: task.description,
+      order: taskOrder,
+    })),
+  });
+}
+
 function courseOrder(track: string): number {
   const order = [
     "EXCEL",
@@ -282,6 +325,11 @@ async function main() {
   console.log("Seeding remaining course structures...");
   for (const course of stubCourses) {
     await seedCourse(course);
+  }
+
+  console.log("Seeding projects...");
+  for (const [index, project] of projects.entries()) {
+    await seedProject(project, index);
   }
 
   console.log("Seed complete.");

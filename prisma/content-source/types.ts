@@ -55,3 +55,23 @@ export interface CourseSeed {
   description: string;
   modules: ModuleSeed[];
 }
+
+export interface ProjectTaskSeed {
+  title: string;
+  description: string;
+}
+
+export interface ProjectSeed {
+  slug: string;
+  /** Slug of the CourseSeed this project belongs to. */
+  courseSlug: string;
+  title: string;
+  businessContext: string;
+  datasetDescription: string;
+  goal: string;
+  deliverables: string[];
+  evaluationCriteria: string[];
+  hints: string[];
+  xpReward?: number;
+  tasks: ProjectTaskSeed[];
+}

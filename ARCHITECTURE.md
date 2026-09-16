@@ -337,6 +337,45 @@ A `userId` of `null` (no session) never triggers the check - every route
 that reaches these use cases already requires authentication via
 `proxy.ts`, so this is purely defensive.
 
+## Projects
+
+`Project`/`ProjectTask`/`ProjectSubmission` (entities, repositories) existed
+from Phase 2; Phase 9 wires them up end to end:
+
+- `ListProjectsUseCase`, `GetProjectUseCase`, `SubmitProjectUseCase`
+  (`features/projects/application/`) follow the same shape as the exercise
+  and quiz use cases, and a `PrismaProjectRepository` /
+  `PrismaProjectSubmissionRepository` implement the entity-layer interfaces.
+- Access is gated the same way as courses and lessons: both `GetProjectUseCase`
+  and `SubmitProjectUseCase` call the existing `assertCourseUnlocked()`
+  against the project's `courseId`, so a project can't be viewed or
+  submitted before its course is unlocked on the roadmap - one policy, no
+  duplicated rule.
+- **Evaluation is unlike exercises/quizzes**: those grade against a stored
+  `correctAnswer`; a business-analysis project has no single correct answer
+  to check server-side. The spec's "Evaluation" section is therefore treated
+  as a self-review checklist shown to the learner (`Project.evaluationCriteria`),
+  not an automated grader. `SubmitProjectUseCase` accepts every submission
+  (`ProjectSubmission.status = "ACCEPTED"`) and awards the project's XP once,
+  on the learner's first submission for that project; resubmitting (e.g. to
+  fix a mistake) is recorded but doesn't re-award XP - mirroring how
+  `SubmitQuizUseCase` only awards XP on a learner's first pass. Manual
+  reviewer feedback remains possible later via the existing `feedback`/
+  `status` columns without a schema change.
+- `Project` gained two fields beyond the Phase 2 schema -
+  `deliverables: Json` and `evaluationCriteria: Json` (both `string[]`) - to
+  hold the "Expected Deliverables" and "Evaluation" sections the spec asks
+  each project to have; `hints` already existed. This was a small additive
+  migration (`add_project_evaluation_fields`), safe since the app has no
+  production data yet.
+- Content: 5 projects seeded from `prisma/content-source/projects.ts`, one
+  per course track. Following the same depth-tiering already used for
+  lessons, Excel's "Sales Analysis" and SQL's "E-commerce Analytics" are
+  fully detailed (business context, dataset, 4 tasks, deliverables, hints,
+  evaluation criteria); the Power BI/Python/Business Analytics projects have
+  the same structure filled in at a lighter level of detail, consistent with
+  those courses' stub-module status.
+
 ## Testing strategy
 
 - **Domain** (`entities/**/*.test.ts`): pure unit tests, no mocks needed
