@@ -1,5 +1,8 @@
 import { prisma } from "@/infrastructure/database/prisma-client";
 import { PrismaUserRepository } from "@/infrastructure/repositories/prisma-user.repository";
+import { BcryptPasswordHasher } from "@/infrastructure/services/bcrypt-password-hasher";
+import { RegisterUserUseCase } from "@/features/authentication/application/register-user.use-case";
+import { AuthenticateUserUseCase } from "@/features/authentication/application/authenticate-user.use-case";
 
 /**
  * Composition root: the one place infrastructure implementations are wired
@@ -9,6 +12,16 @@ import { PrismaUserRepository } from "@/infrastructure/repositories/prisma-user.
  */
 class Container {
   readonly userRepository = new PrismaUserRepository(prisma);
+  readonly passwordHasher = new BcryptPasswordHasher();
+
+  readonly registerUserUseCase = new RegisterUserUseCase(
+    this.userRepository,
+    this.passwordHasher,
+  );
+  readonly authenticateUserUseCase = new AuthenticateUserUseCase(
+    this.userRepository,
+    this.passwordHasher,
+  );
 }
 
 let instance: Container | undefined;

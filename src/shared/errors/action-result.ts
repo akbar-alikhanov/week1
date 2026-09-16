@@ -43,6 +43,19 @@ export async function runAction<T>(fn: () => Promise<T>): Promise<ActionResult<T
   try {
     return actionSuccess(await fn());
   } catch (error) {
+    // Next.js implements redirect()/notFound() by throwing a special error
+    // with a "NEXT_REDIRECT"/"NEXT_HTTP_ERROR_FALLBACK" digest that must
+    // propagate to the framework, not be swallowed as an application error.
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "digest" in error &&
+      typeof error.digest === "string" &&
+      (error.digest.startsWith("NEXT_REDIRECT") ||
+        error.digest.startsWith("NEXT_HTTP_ERROR_FALLBACK"))
+    ) {
+      throw error;
+    }
     return actionFailure<T>(error);
   }
 }

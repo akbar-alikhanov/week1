@@ -167,6 +167,46 @@ exercises, quizzes and progress. `Lesson.contentPath` points at the MDX file;
 the lesson page reads and renders it at request time. This means new lessons
 can be added by dropping a new MDX file + a DB row, without touching UI code.
 
+## Authentication
+
+Auth.js (`next-auth@5`) with a single `Credentials` provider and **JWT**
+sessions (`src/infrastructure/auth/auth.ts`). Route protection is enforced in
+two places:
+
+- `src/proxy.ts` (Next.js 16 renamed `middleware.ts` to `proxy.ts`; the
+  exported function must be named `proxy`) redirects unauthenticated
+  visitors away from every protected route prefix to `/login?from=<path>`,
+  and redirects already-authenticated visitors away from `/login`/`/register`
+  to `/dashboard`.
+- `app/(dashboard)/layout.tsx` re-checks the session server-side and
+  redirects to `/login` if absent, so a protected page is never rendered
+  even if the proxy layer is ever bypassed.
+
+Passwords are hashed with `bcryptjs` (cost factor 12) behind a `PasswordHasher`
+port defined in `features/authentication/application/ports.ts`, so
+`RegisterUserUseCase`/`AuthenticateUserUseCase` stay framework-free and are
+unit-tested against a fake hasher and a fake in-memory `UserRepository`.
+`AuthenticateUserUseCase` deliberately returns `null` for both "no such user"
+and "wrong password" so failed sign-ins don't leak which emails are
+registered.
+
+**No `@auth/prisma-adapter` yet.** The spec asks for architecture that
+_allows_ adding OAuth later, not for OAuth now, and the schema already has
+`Account`/`Session`/`VerificationToken` models ready for it. Wiring the
+adapter today would add a dependency whose compatibility with Prisma 7's new
+`prisma-client` generator output is unverified, for a capability nothing yet
+uses - so it's deferred. Adding an OAuth provider later means installing
+`@auth/prisma-adapter`, passing `adapter: PrismaAdapter(prisma)` into the
+`NextAuth()` call, and keeping `session.strategy = "jwt"` (required whenever
+a `Credentials` provider is present).
+
+`registerAction`/`loginAction` (`features/authentication/actions.ts`) are
+Server Actions that validate input with the same Zod schemas the client form
+uses, call the use case, then call Auth.js's `signIn("credentials", { redirect:
+false })` to establish the session before the client redirects - this keeps
+"submit the form" and "you're signed in" a single request/response round
+trip instead of a second client-side sign-in call.
+
 ## Testing strategy
 
 - **Domain** (`entities/**/*.test.ts`): pure unit tests, no mocks needed
