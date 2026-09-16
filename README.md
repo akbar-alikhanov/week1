@@ -56,7 +56,8 @@ pnpm dev            # start the dev server on http://localhost:3000
 pnpm lint            # ESLint (flat config)
 pnpm typecheck       # tsc --noEmit
 pnpm format          # Prettier write
-pnpm test            # Vitest unit tests (domain / application / infrastructure)
+pnpm test            # Vitest unit tests (domain / application / infrastructure;
+                     # the infrastructure tests need DATABASE_URL reachable)
 pnpm test:e2e        # Playwright end-to-end tests
 pnpm db:studio       # Prisma Studio
 ```

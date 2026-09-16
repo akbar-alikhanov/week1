@@ -399,14 +399,34 @@ means here:
 ## Testing strategy
 
 - **Domain** (`entities/**/*.test.ts`): pure unit tests, no mocks needed
-  since there are no framework dependencies to mock.
+  since there are no framework dependencies to mock - e.g. `Quiz.grade()`,
+  `evaluateAnswer()`, `evaluateNewAchievements()`, `computeUnlockedCourseIds()`.
 - **Application** (`features/*/application/**/*.test.ts`): use cases tested
-  against hand-written in-memory fakes of the repository interfaces.
-- **Infrastructure** (`infrastructure/repositories/**/*.test.ts`): repository
-  implementations tested against a real (local) PostgreSQL database.
+  against hand-written in-memory fakes of the repository interfaces (no
+  mocking library) - e.g. `SubmitExerciseUseCase`, `SubmitQuizUseCase`,
+  `SubmitProjectUseCase`, `CompleteLessonUseCase`.
+- **Infrastructure** (`infrastructure/repositories/**/*.test.ts`,
+  `infrastructure/services/**/*.test.ts`): two sub-categories, both run by
+  `pnpm test` alongside the domain/application suites:
+  - Repository implementations against a real (local) PostgreSQL database via
+    the shared `prisma` client, e.g. `PrismaUserRepository.test.ts` (create /
+    find / XP-save round trip) and `PrismaProjectRepository.test.ts` (the
+    `Json` string-array columns - `deliverables`/`evaluationCriteria`/`hints`
+    - round-trip correctly, and ordered tasks come back in order). Each test
+      creates its own uniquely-named fixture rows and deletes them in
+      `afterAll`, so the suite is safe to run against the same database used
+      for `pnpm dev`/seeding. `vitest.config.mts` loads `.env` (`dotenv/config`)
+      so `DATABASE_URL` is available the same way `playwright.config.ts`
+      already loads it for e2e.
+  - Services tested in isolation where hitting the real dependency isn't the
+    point, e.g. `PostgresSqlSandboxService`'s keyword-denylist/statement-shape
+    rejection tests mock the `pg` driver, since what's under test is the
+    pure validation logic that runs before any query reaches Postgres.
 - **E2E** (`e2e/**/*.spec.ts`, Playwright): golden-path flows - register,
   login, browse a course, complete a lesson, submit an exercise, pass a quiz,
-  see progress update, run a SQL exercise.
+  see progress update, run a SQL exercise, run a query in the standalone
+  playground, submit a project, browse Career Mode's interview prep and
+  resume builder.
 
 ## Open decisions recorded here (spec was ambiguous)
 
