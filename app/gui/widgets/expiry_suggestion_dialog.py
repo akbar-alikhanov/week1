@@ -61,7 +61,7 @@ class _SuggestionRow(ctk.CTkFrame):
             fg_color=theme.color("surface"),
             corner_radius=Radius.MD,
             border_width=2 if selected else 1,
-            border_color=theme.color("success" if selected else "border"),
+            border_color=theme.color("accent" if selected else "border"),
             **kwargs,
         )
         certificate = suggestion.certificate

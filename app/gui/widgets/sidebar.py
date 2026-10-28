@@ -170,8 +170,17 @@ class Sidebar(ctk.CTkFrame):
         brand = ctk.CTkFrame(self, fg_color="transparent", width=0, height=0)
         brand.pack(fill="x", padx=Spacing.MD, pady=(Spacing.LG, Spacing.XL))
 
-        self._logo = ctk.CTkLabel(brand, text="", image=icons.accent("shield", theme, 28), width=32)
+        self._logo = ctk.CTkFrame(
+            brand, fg_color=theme.color("accent"), corner_radius=Radius.MD, width=36, height=36
+        )
         self._logo.pack(side="left")
+        self._logo.pack_propagate(False)
+        self._logo_icon = ctk.CTkLabel(
+            self._logo,
+            text="",
+            image=icons.get("shield_check", 20, light_color="#FFFFFF", dark_color="#FFFFFF"),
+        )
+        self._logo_icon.pack(expand=True)
 
         self._brand_texts = ctk.CTkFrame(brand, fg_color="transparent", width=0, height=0)
         self._brand_texts.pack(side="left", padx=(Spacing.SM, 0), fill="x", expand=True)
@@ -364,7 +373,7 @@ class Sidebar(ctk.CTkFrame):
         """Обновляет цвета после смены темы."""
         try:
             self.configure(fg_color=self._theme.color("surface_alt"))
-            self._logo.configure(image=icons.accent("shield", self._theme, 28))
+            self._logo.configure(fg_color=self._theme.color("accent"))
             self.update_theme_icon()
             for key, button in self._buttons.items():
                 button.set_active(key == self._active, force=True)

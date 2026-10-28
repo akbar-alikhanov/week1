@@ -248,10 +248,19 @@ class StatCard(Card):
             anchor="w",
         ).pack(side="left")
 
-        self._icon_label = ctk.CTkLabel(
-            top, text="", image=icons.colored(icon, theme, accent_role, 18), width=20
+        self._icon_tile = ctk.CTkFrame(
+            top,
+            fg_color=theme.color(f"{accent_role}_soft"),
+            corner_radius=Radius.MD,
+            width=30,
+            height=30,
         )
-        self._icon_label.pack(side="right")
+        self._icon_tile.pack(side="right")
+        self._icon_tile.pack_propagate(False)
+        self._icon_label = ctk.CTkLabel(
+            self._icon_tile, text="", image=icons.colored(icon, theme, accent_role, 16)
+        )
+        self._icon_label.pack(expand=True)
 
         self.value_label = ctk.CTkLabel(
             self.body,
@@ -294,6 +303,7 @@ class StatCard(Card):
         self._accent_role = role
         try:
             self.value_label.configure(text_color=self._theme.color(role))
-            self._icon_label.configure(image=icons.colored(self._icon_name, self._theme, role, 18))
+            self._icon_tile.configure(fg_color=self._theme.color(f"{role}_soft"))
+            self._icon_label.configure(image=icons.colored(self._icon_name, self._theme, role, 16))
         except Exception:
             pass

@@ -127,7 +127,7 @@ class ApplicationWindow(ctk.CTk):
         try:
             from PIL import ImageTk
 
-            image = icons.render_image("shield", 64, self.theme.resolved("accent"))
+            image = icons.render_image("shield_check", 64, self.theme.resolved("accent"))
             self._icon_image = ImageTk.PhotoImage(image)
             self.iconphoto(True, self._icon_image)
         except Exception:

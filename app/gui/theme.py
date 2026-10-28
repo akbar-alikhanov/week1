@@ -46,6 +46,7 @@ class Palette:
         success_soft: Подложка успешного состояния.
         warning_soft: Подложка предупреждения.
         danger_soft: Подложка ошибки.
+        info_soft: Подложка информационного состояния.
         shadow: Цвет имитации тени.
     """
 
@@ -67,31 +68,35 @@ class Palette:
     success_soft: ColorPair
     warning_soft: ColorPair
     danger_soft: ColorPair
+    info_soft: ColorPair
     shadow: ColorPair
 
 
 #: Фирменная палитра BALTON: сдержанный изумрудный акцент на нейтральном фоне.
 #: Выбор обусловлен фармацевтической отраслью (зелёный — отраслевой код)
-#: и требованием читаемости при многочасовой работе.
+#: и требованием читаемости при многочасовой работе. Светлая сторона — точные
+#: цвета дизайн-макета редизайна; тёмная сторона подобрана в той же палитре
+#: оттенков (макет тёмную тему не определяет).
 EMERALD: Final[Palette] = Palette(
-    background=("#F4F6F8", "#16191D"),
+    background=("#F5F7F9", "#16191D"),
     surface=("#FFFFFF", "#1E2227"),
     surface_alt=("#ECEFF3", "#22272D"),
-    surface_hover=("#E3E8EE", "#2A3037"),
-    border=("#DCE1E8", "#2E343B"),
-    text=("#12161B", "#EEF1F5"),
-    text_muted=("#68737F", "#98A3AF"),
+    surface_hover=("#E1E6EB", "#2A3037"),
+    border=("#E3E7EC", "#2E343B"),
+    text=("#151A21", "#EEF1F5"),
+    text_muted=("#5B6472", "#98A3AF"),
     text_inverted=("#FFFFFF", "#0E1114"),
-    accent=("#0E8C6A", "#19B587"),
-    accent_hover=("#0B7659", "#25C795"),
-    accent_soft=("#DFF3EC", "#173029"),
-    success=("#1E9E63", "#31C17E"),
-    warning=("#C08416", "#E0A93A"),
-    danger=("#C6413C", "#E4635E"),
-    info=("#2C6FB5", "#4A94DA"),
-    success_soft=("#E2F5EA", "#142B20"),
-    warning_soft=("#FBF0DA", "#2F2718"),
-    danger_soft=("#FBE5E4", "#2E1B1A"),
+    accent=("#146B5C", "#2DD4BF"),
+    accent_hover=("#0F5248", "#5EEAD4"),
+    accent_soft=("#E7F0EE", "#15302C"),
+    success=("#15803D", "#4ADE80"),
+    warning=("#B45309", "#FBBF24"),
+    danger=("#B91C1C", "#F87171"),
+    info=("#1D4ED8", "#60A5FA"),
+    success_soft=("#DCFCE7", "#14291C"),
+    warning_soft=("#FEF3C7", "#2E2410"),
+    danger_soft=("#FEE2E2", "#2B1616"),
+    info_soft=("#DBEAFE", "#172234"),
     shadow=("#D5DBE3", "#101315"),
 )
 
@@ -115,6 +120,7 @@ SAPPHIRE: Final[Palette] = Palette(
     success_soft=("#E2F5EA", "#142B20"),
     warning_soft=("#FBF0DA", "#2F2718"),
     danger_soft=("#FBE5E4", "#2E1B1A"),
+    info_soft=("#E1EBFA", "#17263D"),
     shadow=("#D3DAE5", "#0F1216"),
 )
 

@@ -605,11 +605,26 @@ class DashboardView(BaseView):
         """Фильтрует таблицу результатов по статусу."""
         self._filter = value
         rows: list[tuple[str, dict[str, Any], str]] = []
+        counts = {
+            "all": 0,
+            MatchStatus.MATCHED.value: 0,
+            MatchStatus.AMBIGUOUS.value: 0,
+            MatchStatus.NOT_FOUND.value: 0,
+        }
 
         for index, result in enumerate(self._results):
             if result.status is MatchStatus.SKIPPED:
                 continue
             status_value = result.status.value
+
+            counts["all"] += 1
+            if result.status.is_resolved:
+                counts[MatchStatus.MATCHED.value] += 1
+            elif result.status is MatchStatus.AMBIGUOUS:
+                counts[MatchStatus.AMBIGUOUS.value] += 1
+            elif result.status is MatchStatus.NOT_FOUND:
+                counts[MatchStatus.NOT_FOUND.value] += 1
+
             if value == MatchStatus.MATCHED.value and not result.status.is_resolved:
                 continue
             if value not in ("all", MatchStatus.MATCHED.value) and status_value != value:
@@ -633,6 +648,7 @@ class DashboardView(BaseView):
             )
 
         self._table.set_rows(rows)
+        self._filter_control.set_counts(counts)
 
     def _open_result_pdf(self, row_id: str) -> None:
         """Открывает PDF сертификата выбранной строки."""

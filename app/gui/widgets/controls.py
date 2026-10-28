@@ -339,7 +339,7 @@ class Tooltip:
 
 
 class SegmentedFilter(ctk.CTkFrame):
-    """Переключатель фильтров в виде группы кнопок."""
+    """Переключатель фильтров в виде группы кнопок-чипов со счётчиками."""
 
     def __init__(
         self,
@@ -365,19 +365,23 @@ class SegmentedFilter(ctk.CTkFrame):
         self._theme = theme
         self._on_change = on_change
         self._buttons: dict[str, ctk.CTkButton] = {}
+        self._labels: dict[str, str] = dict(options)
+        self._counts: dict[str, int] = {}
         self._value = initial or (options[0][0] if options else "")
 
-        for value, label in options:
+        for value, _label in options:
             button = ctk.CTkButton(
                 self,
-                text=label,
+                text=self._labels[value],
                 width=0,
-                height=30,
+                height=34,
                 corner_radius=Radius.PILL,
                 font=theme.font(FontRole.SMALL),
                 fg_color="transparent",
                 hover_color=theme.color("surface_hover"),
                 text_color=theme.color("text_muted"),
+                border_width=1,
+                border_color=theme.color("border"),
                 command=lambda item=value: self.select(item),
             )
             button.pack(side="left", padx=(0, Spacing.XS))
@@ -404,14 +408,28 @@ class SegmentedFilter(ctk.CTkFrame):
         if notify:
             self._on_change(value)
 
+    def set_counts(self, counts: dict[str, int]) -> None:
+        """Обновляет количество позиций, отображаемое рядом с каждой меткой.
+
+        Args:
+            counts: Количество по значению фильтра; отсутствующие значения
+                показываются без счётчика.
+        """
+        self._counts = counts
+        self._refresh()
+
     def _refresh(self) -> None:
-        """Обновляет оформление кнопок."""
+        """Обновляет надписи и оформление кнопок."""
         for value, button in self._buttons.items():
             active = value == self._value
+            count = self._counts.get(value)
+            text = f"{self._labels[value]} · {count}" if count is not None else self._labels[value]
             try:
                 button.configure(
+                    text=text,
                     fg_color=self._theme.color("accent_soft") if active else "transparent",
                     text_color=self._theme.color("accent" if active else "text_muted"),
+                    border_color=self._theme.color("accent" if active else "border"),
                 )
             except Exception:
                 continue

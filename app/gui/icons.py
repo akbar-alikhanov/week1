@@ -419,6 +419,12 @@ def _icon_shield(draw: Any, size: float, width: float, color: Any) -> None:
     )
 
 
+def _icon_shield_check(draw: Any, size: float, width: float, color: Any) -> None:
+    """Защита с подтверждением: щит с галочкой — фирменный знак приложения."""
+    _icon_shield(draw, size, width, color)
+    _stroke(draw, [(0.36, 0.49), (0.46, 0.60), (0.66, 0.36)], size, width * 1.1, color)
+
+
 def _icon_filter(draw: Any, size: float, width: float, color: Any) -> None:
     """Фильтр."""
     _stroke(
@@ -498,6 +504,7 @@ ICONS: Final[dict[str, IconDrawer]] = {
     "copy": _icon_copy,
     "sparkles": _icon_sparkles,
     "shield": _icon_shield,
+    "shield_check": _icon_shield_check,
     "filter": _icon_filter,
     "pdf": _icon_pdf,
 }
