@@ -85,6 +85,8 @@ class _SuggestionRow(ctk.CTkFrame):
             text=_difference_caption(role),
             font=theme.font(FontRole.CAPTION),
             text_color=theme.color(role),
+            wraplength=72,
+            justify="center",
         ).pack(pady=(0, Spacing.XS))
 
         details = ctk.CTkFrame(body, fg_color="transparent", width=0, height=0)
@@ -343,13 +345,15 @@ class ExpirySuggestionDialog(ModalDialog):
         total = len(self._review.batches)
         available = sum(self._review.batches[index].entry.quantity for index in self._choices)
         required = self._review.required_quantity
-        enough = "хватает" if available >= required else "не хватает"
+        is_enough = available >= required
+        enough = "хватает" if is_enough else "не хватает"
         self._summary_label.configure(
             text=(
                 f"Подтверждено партий: {confirmed} из {total}  ·  "
                 f"доступно {_format_quantity(available)} из "
                 f"{_format_quantity(required)} шт. ({enough})"
-            )
+            ),
+            text_color=self._theme.color("success" if is_enough else "warning"),
         )
 
     # -------------------------------------------------------------- действия
