@@ -11,6 +11,12 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      # Код и журналы приложения на русском языке; консоль Windows-раннера
+      # по умолчанию использует codepage cp1252, в котором кириллица не
+      # кодируется — Python 3.7+ UTF-8 mode заставляет stdout/stderr писать
+      # в UTF-8 независимо от локали раннера.
+      PYTHONUTF8: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
