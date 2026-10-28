@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 ICON_SIZES: tuple[int, ...] = (16, 20, 24, 32, 40, 48, 64, 128, 256)
 
 #: Фирменный цвет иконки (совпадает с акцентом палитры «emerald»).
-ICON_COLOR: str = "#0E8C6A"
+ICON_COLOR: str = "#146B5C"
 
 #: Путь итогового файла.
 OUTPUT_PATH = Path(__file__).resolve().parents[1] / "app" / "resources" / "icons" / "app.ico"
@@ -54,7 +54,7 @@ def main() -> int:
         fill="#FFFFFF",
     )
     icon_size = int(base_size * 0.62)
-    icon_image = icons.render_image("shield", icon_size, ICON_COLOR).convert("RGBA")
+    icon_image = icons.render_image("shield_check", icon_size, ICON_COLOR).convert("RGBA")
     offset = ((base_size - icon_size) // 2, (base_size - icon_size) // 2)
     padded.alpha_composite(icon_image, offset)
 

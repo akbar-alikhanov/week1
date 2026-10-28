@@ -1,0 +1,37 @@
+name: Build Windows EXE
+
+on:
+  push:
+    branches:
+      - claude/pharmacy-certificate-automation-3z18tz
+    paths-ignore:
+      - "**.md"
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Build application icon
+        run: python scripts/build_icon.py
+
+      - name: Build EXE with PyInstaller
+        run: pyinstaller packaging/certmatcher.spec --noconfirm
+
+      - name: Upload EXE artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BaltonCertMatcher-windows-exe
+          path: dist/BaltonCertMatcher.exe
+          if-no-files-found: error
