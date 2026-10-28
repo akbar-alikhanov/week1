@@ -866,16 +866,18 @@ def _write_csv(destination: Path, payload: list[dict[str, Any]]) -> None:
 def _write_xlsx(destination: Path, payload: list[dict[str, Any]]) -> None:
     """Записывает записи обмена в Excel."""
     from openpyxl import Workbook
+    from openpyxl.utils import get_column_letter
 
     workbook = Workbook()
     sheet = workbook.active
+    assert sheet is not None
     sheet.title = "Словарь соответствий"
     sheet.append(list(_EXCHANGE_FIELDS))
     for record in payload:
         sheet.append([record.get(field) for field in _EXCHANGE_FIELDS])
-    for column_cells in sheet.columns:
+    for index, column_cells in enumerate(sheet.columns, start=1):
         length = max((len(str(cell.value)) for cell in column_cells if cell.value), default=10)
-        sheet.column_dimensions[column_cells[0].column_letter].width = min(60, max(12, length + 2))
+        sheet.column_dimensions[get_column_letter(index)].width = min(60, max(12, length + 2))
     workbook.save(destination)
 
 
@@ -886,6 +888,7 @@ def _read_xlsx(source: Path) -> list[dict[str, Any]]:
     workbook = load_workbook(source, read_only=True, data_only=True)
     try:
         sheet = workbook.active
+        assert sheet is not None
         rows = sheet.iter_rows(values_only=True)
         headers = [str(value or "").strip() for value in next(rows, ())]
         records: list[dict[str, Any]] = []
