@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -11,9 +12,9 @@ import customtkinter as ctk
 from app.core.dates import format_date
 from app.gui.theme import FontRole, Spacing
 from app.gui.views.base_view import BaseView
-from app.gui.widgets.card import SectionCard
-from app.gui.widgets.controls import SegmentedFilter, secondary_button
-from app.gui.widgets.data_table import Column, DataTable
+from app.gui.widgets.card import SectionCard, StatCard
+from app.gui.widgets.controls import Badge, SegmentedFilter, secondary_button
+from app.gui.widgets.data_table import Column, DataTable, EmptyState
 from app.gui.widgets.pdf_viewer import PdfViewer
 from app.gui.widgets.search_entry import SearchEntry
 from app.models.certificate_product import CertificateProduct
@@ -43,6 +44,8 @@ class CertificatesView(BaseView):
         self._certificates: list[CertificateProduct] = []
         self._filter = "all"
         self._query = ""
+        self._stat_cards: dict[str, StatCard] = {}
+        self._empty_visible = False
 
     # ---------------------------------------------------------------- разметка
     def build(self) -> None:
@@ -54,6 +57,8 @@ class CertificatesView(BaseView):
             icon="refresh",
             command=lambda: self.app.navigate("dashboard", action="reimport"),
         ).pack(side="right")
+
+        self._build_stats()
 
         toolbar = ctk.CTkFrame(self.content, fg_color="transparent", width=0, height=0)
         toolbar.pack(fill="x", pady=(0, Spacing.MD))
@@ -67,7 +72,7 @@ class CertificatesView(BaseView):
         )
         self.search.pack(side="left")
 
-        SegmentedFilter(
+        self._filter_control = SegmentedFilter(
             toolbar,
             self.theme,
             options=[
@@ -78,7 +83,8 @@ class CertificatesView(BaseView):
                 ("incomplete", "Без срока"),
             ],
             on_change=self._on_filter,
-        ).pack(side="left", padx=(Spacing.MD, 0))
+        )
+        self._filter_control.pack(side="left", padx=(Spacing.MD, 0))
 
         self._count_label = ctk.CTkLabel(
             toolbar,
@@ -114,6 +120,16 @@ class CertificatesView(BaseView):
         )
         self._table.grid(row=0, column=0, sticky="nsew", padx=(0, Spacing.MD))
 
+        self._empty_state = EmptyState(
+            split,
+            self.theme,
+            icon="certificate",
+            title="База сертификатов пока пуста",
+            message="Импортируйте Excel-файл с сертификатами на экране «Подбор».",
+            action_text="Перейти к импорту",
+            on_action=lambda: self.app.navigate("dashboard", action="reimport"),
+        )
+
         side = ctk.CTkFrame(split, fg_color="transparent", width=0, height=0)
         side.grid(row=0, column=1, sticky="nsew")
         side.grid_rowconfigure(1, weight=1)
@@ -146,6 +162,91 @@ class CertificatesView(BaseView):
 
         self.refresh()
 
+    def _build_stats(self) -> None:
+        """Создаёт полосу ключевых показателей по базе сертификатов.
+
+        Числа всегда по всей базе (как в :meth:`DashboardView._build_stats`),
+        независимо от активного поиска и фильтра — щелчок по карточке лишь
+        переключает фильтр таблицы через тот же :class:`SegmentedFilter`.
+        """
+        ctk.CTkLabel(
+            self.content,
+            text="Обзор базы".upper(),
+            font=self.theme.font(FontRole.CAPTION, mono=True),
+            text_color=self.theme.color("text_muted"),
+            anchor="w",
+        ).pack(fill="x", anchor="w", pady=(0, Spacing.SM))
+
+        row = ctk.CTkFrame(self.content, fg_color="transparent", width=0, height=0)
+        row.pack(fill="x", pady=(0, Spacing.LG))
+        for index in range(4):
+            row.grid_columnconfigure(index, weight=1, uniform="stats")
+
+        definitions = [
+            ("all", "Всего в базе", "database", "accent", ""),
+            ("valid", "Действующих", "check", "success", "без просроченных"),
+            ("expiring", "Истекают ≤90 дн.", "history", "warning", "пора продлевать"),
+            ("expired", "Просрочено", "alert", "danger", "требуют замены"),
+        ]
+        for column, (key, title, icon, role, hint) in enumerate(definitions):
+            card = StatCard(
+                row,
+                self.theme,
+                title=title,
+                icon=icon,
+                accent_role=role,
+                hint=hint,
+                animator=self.app.animator,
+                on_click=self._make_filter_click(key),
+            )
+            card.grid(
+                row=0, column=column, sticky="nsew", padx=(0 if column == 0 else Spacing.MD, 0)
+            )
+            self._stat_cards[key] = card
+
+    def _make_filter_click(self, value: str) -> Callable[[], None]:
+        """Создаёт обработчик щелчка по карточке — выбирает фильтр таблицы.
+
+        Именованная фабрика вместо ``lambda value=value: ...`` внутри цикла —
+        тот же приём, что и в ``DashboardView``/``Sidebar``.
+
+        Args:
+            value: Значение фильтра, соответствующее карточке.
+
+        Returns:
+            Обработчик без аргументов для ``StatCard.on_click``.
+        """
+        return lambda: self._filter_control.select(value)
+
+    def _update_stats(self) -> None:
+        """Обновляет карточки показателей и счётчики фильтра по всей базе."""
+        try:
+            stats = self.app.container.certificate_repository.statistics()
+        except Exception:
+            _LOGGER.debug("Не удалось обновить показатели базы сертификатов", exc_info=True)
+            return
+
+        total = stats.get("total", 0)
+        expired = stats.get("expired", 0)
+        expiring = stats.get("expiring_soon", 0)
+        without_expiry = stats.get("without_expiry", 0)
+        valid = max(0, total - expired - without_expiry)
+
+        self._stat_cards["all"].update_value(str(total))
+        self._stat_cards["valid"].update_value(str(valid))
+        self._stat_cards["expiring"].update_value(str(expiring))
+        self._stat_cards["expired"].update_value(str(expired))
+
+        self._filter_control.set_counts(
+            {
+                "all": total,
+                "valid": valid,
+                "expiring": expiring,
+                "expired": expired,
+                "incomplete": without_expiry,
+            }
+        )
+
     # ------------------------------------------------------------- поведение
     def on_show(self) -> None:
         """Обновляет список при открытии раздела."""
@@ -168,6 +269,7 @@ class CertificatesView(BaseView):
 
         self._certificates = [item for item in found if self._matches_filter(item)]
         self._render()
+        self._update_stats()
 
     def _matches_filter(self, certificate: CertificateProduct) -> bool:
         """Проверяет соответствие позиции активному фильтру."""
@@ -212,6 +314,15 @@ class CertificatesView(BaseView):
         total = self.app.container.certificate_repository.count()
         self._count_label.configure(text=f"показано {len(rows)} из {total}")
 
+        if total == 0 and not self._empty_visible:
+            self._empty_visible = True
+            self._table.grid_remove()
+            self._empty_state.grid(row=0, column=0, sticky="nsew", padx=(0, Spacing.MD))
+        elif total > 0 and self._empty_visible:
+            self._empty_visible = False
+            self._empty_state.grid_remove()
+            self._table.grid(row=0, column=0, sticky="nsew", padx=(0, Spacing.MD))
+
     def _on_search(self, query: str) -> None:
         """Обрабатывает изменение поискового запроса."""
         self._query = query
@@ -234,28 +345,30 @@ class CertificatesView(BaseView):
         """Заполняет карточку сведений."""
         for child in self._details_body.winfo_children():
             child.destroy()
+        for child in self._details_card.actions.winfo_children():
+            child.destroy()
 
         self._details_card.set_subtitle(certificate.display_number)
+        if certificate.is_expired:
+            Badge(self._details_card.actions, self.theme, text="Срок истёк", role="danger").pack()
 
-        fields: list[tuple[str, str]] = [
-            ("Товар", certificate.product_name),
-            ("Номер сертификата", certificate.display_number),
-            ("Объём", str(certificate.volume) if certificate.volume else "не определён"),
-            ("Действует до", format_date(certificate.expiry_date)),
-            ("Строка в Excel", str(certificate.source_row or "—")),
+        expiry_role = "danger" if certificate.is_expired else "text"
+        fields: list[tuple[str, str, str]] = [
+            ("Товар", certificate.product_name, "text"),
+            ("Номер сертификата", certificate.display_number, "text"),
+            ("Объём", str(certificate.volume) if certificate.volume else "не определён", "text"),
+            ("Действует до", format_date(certificate.expiry_date), expiry_role),
+            ("Строка в Excel", str(certificate.source_row or "—"), "text"),
         ]
 
-        if certificate.is_expired:
-            fields.insert(0, ("ВНИМАНИЕ", "Срок годности истёк"))
-
-        for label, value in fields:
+        for label, value, role in fields:
             row = ctk.CTkFrame(self._details_body, fg_color="transparent", width=0, height=0)
             row.pack(fill="x", pady=1)
             ctk.CTkLabel(
                 row,
                 text=label,
                 font=self.theme.font(FontRole.CAPTION),
-                text_color=self.theme.color("danger" if label == "ВНИМАНИЕ" else "text_muted"),
+                text_color=self.theme.color("text_muted"),
                 width=140,
                 anchor="w",
             ).pack(side="left")
@@ -263,7 +376,7 @@ class CertificatesView(BaseView):
                 row,
                 text=value,
                 font=self.theme.font(FontRole.CAPTION),
-                text_color=self.theme.color("danger" if label == "ВНИМАНИЕ" else "text"),
+                text_color=self.theme.color(role),
                 anchor="w",
                 justify="left",
                 wraplength=260,

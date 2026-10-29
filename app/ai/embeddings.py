@@ -48,6 +48,7 @@ class EmbeddingBackendStatus:
         model_name: Идентификатор модели.
         dimension: Размерность векторов (0, если модель не загружена).
         message: Пояснение для пользователя.
+        failed: Провалилась ли последняя попытка загрузки модели.
     """
 
     available: bool
@@ -55,6 +56,7 @@ class EmbeddingBackendStatus:
     model_name: str
     dimension: int = 0
     message: str = ""
+    failed: bool = False
 
 
 def text_hash(text: str) -> str:
@@ -180,6 +182,7 @@ class EmbeddingBackend:
                 loaded=False,
                 model_name=self._model_name,
                 message=f"Модель не загрузилась: {self._failure_reason}",
+                failed=True,
             )
         return EmbeddingBackendStatus(
             available=True,

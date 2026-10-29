@@ -11,7 +11,7 @@ import customtkinter as ctk
 from app.core.logging_setup import LogRecordView
 from app.gui.theme import FontRole, Radius, Spacing
 from app.gui.views.base_view import BaseView
-from app.gui.widgets.controls import SegmentedFilter, ghost_button, secondary_button
+from app.gui.widgets.controls import Badge, SegmentedFilter, ghost_button, secondary_button
 from app.gui.widgets.search_entry import SearchEntry
 
 _LOGGER = logging.getLogger(__name__)
@@ -47,6 +47,8 @@ class LogsView(BaseView):
         self._query = ""
         self._unsubscribe: Any = None
         self._follow = True
+        self._warning_total = 0
+        self._error_total = 0
 
     def build(self) -> None:
         """Создаёт содержимое раздела."""
@@ -58,8 +60,12 @@ class LogsView(BaseView):
             command=self._open_log_file,
         ).pack(side="right")
 
+        # Два ряда, а не один: со счётчиками в фильтре и новыми бейджами
+        # всё вместе в одну строку уже не помещается на экранах обычной
+        # ширины — панель инструментов начинает сминать свои же виджеты
+        # (см. историю правок). Разделение надёжнее подбора ширин на глаз.
         toolbar = ctk.CTkFrame(self.content, fg_color="transparent", width=0, height=0)
-        toolbar.pack(fill="x", pady=(0, Spacing.MD))
+        toolbar.pack(fill="x", pady=(0, Spacing.SM))
 
         self.search = SearchEntry(
             toolbar,
@@ -70,7 +76,7 @@ class LogsView(BaseView):
         )
         self.search.pack(side="left")
 
-        SegmentedFilter(
+        self._filter_control = SegmentedFilter(
             toolbar,
             self.theme,
             options=[
@@ -80,10 +86,14 @@ class LogsView(BaseView):
                 ("error", "Ошибки"),
             ],
             on_change=self._on_level,
-        ).pack(side="left", padx=(Spacing.MD, 0))
+        )
+        self._filter_control.pack(side="left", padx=(Spacing.MD, 0))
+
+        controls = ctk.CTkFrame(self.content, fg_color="transparent", width=0, height=0)
+        controls.pack(fill="x", pady=(0, Spacing.MD))
 
         self._follow_switch = ctk.CTkSwitch(
-            toolbar,
+            controls,
             text="Следить",
             command=self._toggle_follow,
             font=self.theme.font(FontRole.SMALL),
@@ -95,7 +105,13 @@ class LogsView(BaseView):
         self._follow_switch.select()
         self._follow_switch.pack(side="right")
 
-        ghost_button(toolbar, self.theme, text="Очистить", icon="trash", command=self._clear).pack(
+        self._error_badge = Badge(controls, self.theme, text="ошибок: 0", role="danger")
+        self._error_badge.pack(side="right", padx=(0, Spacing.SM))
+
+        self._warning_badge = Badge(controls, self.theme, text="предупреждений: 0", role="warning")
+        self._warning_badge.pack(side="right", padx=(0, Spacing.SM))
+
+        ghost_button(controls, self.theme, text="Очистить", icon="trash", command=self._clear).pack(
             side="right", padx=(0, Spacing.SM)
         )
 
@@ -162,6 +178,37 @@ class LogsView(BaseView):
                 f"файл журнала: {self.app.container.paths.log_file}"
             )
         )
+        self._update_counters(handler.snapshot(min_level=logging.NOTSET))
+
+    def _update_counters(self, all_records: list[LogRecordView]) -> None:
+        """Обновляет счётчики фильтра и бейджи предупреждений/ошибок.
+
+        Счётчики фильтра — по текущему поисковому запросу, но независимо от
+        выбранного уровня (иначе счётчик своей же вкладки обнулялся бы при
+        её выборе). Бейджи у переключателя «Следить» — по всему буферу,
+        это постоянный индикатор состояния, а не производная от фильтров.
+        """
+        needle = self._query.lower()
+        matching = [r for r in all_records if not needle or needle in r.message.lower()]
+        self._filter_control.set_counts(
+            {
+                "all": len(matching),
+                "info": sum(1 for r in matching if r.level_number >= logging.INFO),
+                "warning": sum(1 for r in matching if r.level_number >= logging.WARNING),
+                "error": sum(1 for r in matching if r.level_number >= logging.ERROR),
+            }
+        )
+
+        # Полный пересчёт синхронизирует счётчики с кольцевым буфером журнала
+        # (старые записи из него вытесняются) — инкремент в ``_on_record``
+        # этого не видит и только прибавляет, поэтому периодическая
+        # ресинхронизация здесь не даёт ему уйти в постоянный перебор.
+        self._warning_total = sum(
+            1 for r in all_records if logging.WARNING <= r.level_number < logging.ERROR
+        )
+        self._error_total = sum(1 for r in all_records if r.level_number >= logging.ERROR)
+        self._warning_badge.update_state(f"предупреждений: {self._warning_total}", "warning")
+        self._error_badge.update_state(f"ошибок: {self._error_total}", "danger")
 
     def _append_record(self, record: LogRecordView) -> None:
         """Добавляет запись в текстовое поле."""
@@ -198,8 +245,24 @@ class LogsView(BaseView):
         self._unsubscribe = handler.subscribe(_listener)
 
     def _on_record(self, record: LogRecordView) -> None:
-        """Добавляет новую запись, если она проходит фильтры."""
-        if not self.winfo_exists() or not self._follow:
+        """Добавляет новую запись, если она проходит фильтры, и обновляет бейджи.
+
+        Бейджи предупреждений/ошибок обновляются здесь дешёвым инкрементом
+        (не полным пересчётом ``_update_counters`` — при обработке большого
+        заказа это вызывалось бы на каждую строку лога) независимо от
+        «Следить», чтобы оставаться живым индикатором, даже когда
+        автопрокрутка самого текста выключена.
+        """
+        if not self.winfo_exists():
+            return
+        if record.level_number >= logging.ERROR:
+            self._error_total += 1
+            self._error_badge.update_state(f"ошибок: {self._error_total}", "danger")
+        elif record.level_number >= logging.WARNING:
+            self._warning_total += 1
+            self._warning_badge.update_state(f"предупреждений: {self._warning_total}", "warning")
+
+        if not self._follow:
             return
         if record.level_number < self._level:
             return

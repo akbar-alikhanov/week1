@@ -22,7 +22,7 @@ from app.gui.views.base_view import BaseView
 from app.gui.widgets.alias_dialog import AliasAuditDialog, AliasEditDialog
 from app.gui.widgets.base import focus_in_text_entry
 from app.gui.widgets.card import SectionCard
-from app.gui.widgets.controls import ghost_button, icon_button, secondary_button
+from app.gui.widgets.controls import Badge, ghost_button, icon_button, secondary_button
 from app.gui.widgets.data_table import Column, DataTable, EmptyState
 from app.gui.widgets.dialogs import ask_confirmation
 from app.gui.widgets.search_entry import SearchEntry
@@ -483,29 +483,7 @@ class AliasesView(BaseView):
 
         self._details_card.set_subtitle(alias.target_name or "русское название не указано")
 
-        fields: list[tuple[str, str]] = [
-            ("Товар в сертификате", alias.target_name or "—"),
-            ("Бренд", alias.brand or "—"),
-            ("Объём", alias.volume_label or "не указан"),
-            ("Доверие", f"{alias.confidence:.0f} % · {alias.source_label}"),
-            ("Применений", str(alias.hit_count)),
-            (
-                "Последнее применение",
-                (
-                    alias.last_used_at.strftime("%d.%m.%Y %H:%M")
-                    if alias.last_used_at
-                    else "ещё не применялся"
-                ),
-            ),
-            (
-                "Создано",
-                f"{alias.created_at.strftime('%d.%m.%Y %H:%M')}"
-                + (f" · {alias.created_by}" if alias.created_by else ""),
-            ),
-            ("Изменено", alias.updated_at.strftime("%d.%m.%Y %H:%M")),
-            ("Комментарий", alias.note or "—"),
-        ]
-        for label, value in fields:
+        def _field_row(label: str, value: str) -> None:
             row = ctk.CTkFrame(self._details_body, fg_color="transparent", width=0, height=0)
             row.pack(fill="x", pady=1)
             ctk.CTkLabel(
@@ -525,6 +503,44 @@ class AliasesView(BaseView):
                 justify="left",
                 wraplength=210,
             ).pack(side="left", fill="x", expand=True)
+
+        _field_row("Товар в сертификате", alias.target_name or "—")
+        _field_row("Бренд", alias.brand or "—")
+        _field_row("Объём", alias.volume_label or "не указан")
+
+        confidence_row = ctk.CTkFrame(self._details_body, fg_color="transparent", width=0, height=0)
+        confidence_row.pack(fill="x", pady=1)
+        ctk.CTkLabel(
+            confidence_row,
+            text="Доверие",
+            font=self.theme.font(FontRole.CAPTION),
+            text_color=self.theme.color("text_muted"),
+            width=170,
+            anchor="w",
+        ).pack(side="left")
+        Badge(
+            confidence_row,
+            self.theme,
+            text=f"{alias.confidence:.0f} % · {alias.source_label}",
+            role=_confidence_role(alias.confidence),
+        ).pack(side="left")
+
+        _field_row("Применений", str(alias.hit_count))
+        _field_row(
+            "Последнее применение",
+            (
+                alias.last_used_at.strftime("%d.%m.%Y %H:%M")
+                if alias.last_used_at
+                else "ещё не применялся"
+            ),
+        )
+        _field_row(
+            "Создано",
+            f"{alias.created_at.strftime('%d.%m.%Y %H:%M')}"
+            + (f" · {alias.created_by}" if alias.created_by else ""),
+        )
+        _field_row("Изменено", alias.updated_at.strftime("%d.%m.%Y %H:%M"))
+        _field_row("Комментарий", alias.note or "—")
 
         actions = ctk.CTkFrame(self._details_body, fg_color="transparent", width=0, height=0)
         actions.pack(fill="x", pady=(Spacing.MD, 0))
@@ -600,7 +616,7 @@ class AliasesView(BaseView):
     def _render_related_row(self, certificate: CertificateProduct) -> None:
         """Отображает одну строку найденной позиции базы в панели сведений."""
         row = ctk.CTkFrame(
-            self._details_body, fg_color=self.theme.color("surface_alt"), corner_radius=Radius.SM
+            self._details_body, fg_color=self.theme.color("surface_alt"), corner_radius=Radius.MD
         )
         row.pack(fill="x", pady=2)
         ctk.CTkLabel(
@@ -981,3 +997,17 @@ class AliasesView(BaseView):
 def _format_volume(value: float) -> str:
     """Форматирует значение объёма для списка фильтра."""
     return f"{value:g} мл"
+
+
+def _confidence_role(confidence: float) -> str:
+    """Определяет роль цвета бейджа уровня доверия записи.
+
+    Три значения соответствуют уровням ``Alias.confidence`` — 100
+    (запись пользователя), 95 (ИИ, подтверждено частым применением),
+    80 (ИИ, не подтверждено).
+    """
+    if confidence >= 100:
+        return "success"
+    if confidence >= 95:
+        return "accent"
+    return "warning"

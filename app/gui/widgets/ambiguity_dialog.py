@@ -94,7 +94,7 @@ class CandidateRow(ctk.CTkFrame):
         ctk.CTkLabel(
             score_box,
             text=f"{candidate.percent}%",
-            font=theme.font(FontRole.HEADING),
+            font=theme.font(FontRole.HEADING, mono=True),
             text_color=theme.color(_score_color(candidate.total)),
         ).pack(expand=True, pady=(Spacing.SM, 0))
 
@@ -266,14 +266,26 @@ class AmbiguityDialog(ModalDialog):
         ctk.CTkLabel(
             top,
             text="ПОЗИЦИЯ ЗАКАЗА",
-            font=theme.font(FontRole.CAPTION),
+            font=theme.font(FontRole.CAPTION, mono=True),
             text_color=theme.color("text_muted"),
             anchor="w",
         ).pack(side="left")
 
+        ctk.CTkButton(
+            top,
+            text="",
+            image=icons.colored("close", theme, "text_muted", 14),
+            width=22,
+            height=22,
+            corner_radius=Radius.SM,
+            fg_color="transparent",
+            hover_color=theme.color("surface_hover"),
+            command=self.close,
+        ).pack(side="right")
+
         if remaining > 0:
             Badge(top, theme, text=f"осталось разобрать: {remaining}", role="warning").pack(
-                side="right"
+                side="right", padx=(0, Spacing.SM)
             )
 
         ctk.CTkLabel(

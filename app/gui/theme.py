@@ -164,6 +164,9 @@ class Sizes:
     ICON: Final[int] = 20
     ICON_LG: Final[int] = 24
     ICON_XL: Final[int] = 40
+    TILE_SM: Final[int] = 30
+    TILE_MD: Final[int] = 36
+    TILE_LG: Final[int] = 44
     MIN_WINDOW: Final[tuple[int, int]] = (1120, 700)
     DEFAULT_WINDOW: Final[tuple[int, int]] = (1360, 860)
 

@@ -8,7 +8,7 @@ from typing import Any
 
 import customtkinter as ctk
 
-from app.core.constants import APP_COMPANY, APP_NAME, APP_VERSION
+from app.core.constants import APP_NAME, APP_VERSION
 from app.gui.animations import DURATION_NORMAL, Animator
 from app.gui.icons import icons
 from app.gui.theme import FontRole, Radius, Sizes, Spacing, Theme
@@ -171,7 +171,11 @@ class Sidebar(ctk.CTkFrame):
         brand.pack(fill="x", padx=Spacing.MD, pady=(Spacing.LG, Spacing.XL))
 
         self._logo = ctk.CTkFrame(
-            brand, fg_color=theme.color("accent"), corner_radius=Radius.MD, width=36, height=36
+            brand,
+            fg_color=theme.color("accent"),
+            corner_radius=Radius.MD,
+            width=Sizes.TILE_MD,
+            height=Sizes.TILE_MD,
         )
         self._logo.pack(side="left")
         self._logo.pack_propagate(False)
@@ -187,14 +191,14 @@ class Sidebar(ctk.CTkFrame):
 
         ctk.CTkLabel(
             self._brand_texts,
-            text="CertMatcher",
+            text=APP_NAME.split()[0],
             font=theme.font(FontRole.SUBHEADING),
             text_color=theme.color("text"),
             anchor="w",
         ).pack(fill="x", anchor="w")
         ctk.CTkLabel(
             self._brand_texts,
-            text=APP_COMPANY,
+            text=APP_NAME.split()[-1],
             font=theme.font(FontRole.CAPTION),
             text_color=theme.color("text_muted"),
             anchor="w",

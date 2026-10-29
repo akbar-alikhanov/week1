@@ -19,7 +19,7 @@ from app.gui.theme import FontRole, Radius, Spacing
 from app.gui.views.base_view import BaseView
 from app.gui.widgets.base import format_bytes
 from app.gui.widgets.card import SectionCard
-from app.gui.widgets.controls import ghost_button, secondary_button
+from app.gui.widgets.controls import Badge, ghost_button, secondary_button
 from app.gui.widgets.dialogs import ask_confirmation
 
 _LOGGER = logging.getLogger(__name__)
@@ -48,6 +48,7 @@ class SettingsView(BaseView):
         super().__init__(master, app, **kwargs)
         self._save_after: str | None = None
         self._weight_labels: dict[str, ctk.CTkLabel] = {}
+        self._semantic_badge: Badge | None = None
 
     # ---------------------------------------------------------------- разметка
     def build(self) -> None:
@@ -87,6 +88,33 @@ class SettingsView(BaseView):
         )
         card.pack(fill="x", pady=(0, Spacing.LG))
         return card
+
+    def _subgroup(self, master: Any, title: str) -> ctk.CTkFrame:
+        """Создаёт именованный подблок настроек на фоне ``surface_alt``.
+
+        Группирует несколько родственных строк внутри карточки — например,
+        «что создавать» отдельно от «названия колонок» в результате
+        обработки, вместо одного плоского списка переключателей.
+
+        Returns:
+            Внутренний контейнер с отступами — строки настроек пакуются в
+            него, как и в ``card.content`` самой карточки.
+        """
+        container = ctk.CTkFrame(
+            master, fg_color=self.theme.color("surface_alt"), corner_radius=Radius.MD
+        )
+        container.pack(fill="x", pady=(0, Spacing.MD))
+        ctk.CTkLabel(
+            container,
+            text=title.upper(),
+            font=self.theme.font(FontRole.CAPTION, mono=True),
+            text_color=self.theme.color("text_muted"),
+            anchor="w",
+        ).pack(fill="x", anchor="w", padx=Spacing.MD, pady=(Spacing.MD, 0))
+
+        body = ctk.CTkFrame(container, fg_color="transparent", width=0, height=0)
+        body.pack(fill="x", padx=Spacing.MD, pady=(0, Spacing.SM))
+        return body
 
     # ------------------------------------------------------------- подбор
     def _build_matching_section(self) -> None:
@@ -181,12 +209,15 @@ class SettingsView(BaseView):
             matching.auto_resolve_duplicates,
             lambda value: self._set("matching", "auto_resolve_duplicates", value),
         )
-        self._switch_row(
+        badge_text, badge_role = self._semantic_badge_state()
+        self._semantic_badge = self._switch_row(
             card.content,
             "Семантический поиск (ИИ)",
             self.app.container.embedding_backend.status().message,
             matching.use_semantic,
             self._toggle_semantic,
+            badge_text=badge_text,
+            badge_role=badge_role,
         )
 
     def _weight_row(self, master: Any, key: str, label: str, initial: float) -> None:
@@ -259,6 +290,22 @@ class SettingsView(BaseView):
                 "на нечётком поиске и соответствиях.",
                 title="Семантический поиск недоступен",
             )
+        if self._semantic_badge is not None:
+            text, role = self._semantic_badge_state()
+            self._semantic_badge.update_state(text, role)
+
+    def _semantic_badge_state(self) -> tuple[str, str]:
+        """Определяет надпись и роль бейджа статуса семантического поиска."""
+        status = self.app.container.embedding_backend.status()
+        if not status.available:
+            return "недоступно", "muted"
+        if not self._settings.matching.use_semantic:
+            return "выключено", "muted"
+        if status.failed:
+            return "ошибка загрузки", "danger"
+        if status.loaded:
+            return "активно", "success"
+        return "загрузится при использовании", "warning"
 
     # ------------------------------------------------------ база сертификатов
     def _build_certificates_section(self) -> None:
@@ -437,58 +484,62 @@ class SettingsView(BaseView):
             export.output_dir,
             lambda value: self._set("export", "output_dir", value),
         )
+
+        creation = self._subgroup(card.content, "Что создавать")
         self._switch_row(
-            card.content,
+            creation,
             "Копировать PDF сертификатов",
             "Создавать папку Certificates рядом с итоговым файлом",
             export.copy_certificates,
             lambda value: self._set("export", "copy_certificates", value),
         )
         self._switch_row(
-            card.content,
+            creation,
             "Подсвечивать строки в Excel",
             "Зелёный — найдено, жёлтый — требует проверки, красный — не найдено",
             export.highlight_rows,
             lambda value: self._set("export", "highlight_rows", value),
         )
         self._switch_row(
-            card.content,
+            creation,
             "Формировать отчёт",
             "Отдельная книга со сводкой и детализацией по каждой позиции",
             export.write_report,
             lambda value: self._set("export", "write_report", value),
         )
         self._switch_row(
-            card.content,
+            creation,
             "Добавлять колонку с оценкой",
             "Служебная колонка с процентом совпадения",
             export.add_score_column,
             lambda value: self._set("export", "add_score_column", value),
         )
         self._switch_row(
-            card.content,
+            creation,
             "Открывать папку после обработки",
             "Сразу показывать результат в проводнике",
             export.open_output_after_run,
             lambda value: self._set("export", "open_output_after_run", value),
         )
         self._entry_row(
-            card.content,
+            creation,
+            "Суффикс имени файла",
+            export.filename_suffix,
+            lambda value: self._set("export", "filename_suffix", value),
+        )
+
+        titles = self._subgroup(card.content, "Названия колонок")
+        self._entry_row(
+            titles,
             "Заголовок колонки номера сертификата",
             export.certificate_column_title,
             lambda value: self._set("export", "certificate_column_title", value),
         )
         self._entry_row(
-            card.content,
+            titles,
             "Заголовок колонки срока сертификата",
             export.expiry_column_title,
             lambda value: self._set("export", "expiry_column_title", value),
-        )
-        self._entry_row(
-            card.content,
-            "Суффикс имени файла",
-            export.filename_suffix,
-            lambda value: self._set("export", "filename_suffix", value),
         )
 
     # -------------------------------------------------------------- интерфейс
@@ -767,8 +818,27 @@ class SettingsView(BaseView):
         description: str,
         value: bool,
         on_change: Callable[[bool], None],
-    ) -> None:
-        """Создаёт строку с переключателем."""
+        *,
+        badge_text: str = "",
+        badge_role: str = "muted",
+    ) -> Badge | None:
+        """Создаёт строку с переключателем.
+
+        Args:
+            master: Родительский виджет.
+            title: Заголовок строки.
+            description: Пояснение под заголовком.
+            value: Текущее значение.
+            on_change: Обработчик изменения значения.
+            badge_text: Надпись бейджа статуса рядом с переключателем;
+                пустая строка — без бейджа.
+            badge_role: Роль цвета бейджа (см. :class:`Badge`).
+
+        Returns:
+            Созданный бейдж — вызывающий код обновляет его при изменении
+            состояния без пересборки строки; ``None``, если ``badge_text``
+            не передан.
+        """
         row = self._row(master, title, description)
         variable = ctk.BooleanVar(value=value)
         switch = ctk.CTkSwitch(
@@ -782,6 +852,12 @@ class SettingsView(BaseView):
             command=lambda: on_change(bool(variable.get())),
         )
         switch.pack(side="right", padx=(Spacing.MD, 0))
+
+        if not badge_text:
+            return None
+        badge = Badge(row, self.theme, text=badge_text, role=badge_role)
+        badge.pack(side="right", padx=(Spacing.MD, 0))
+        return badge
 
     def _slider_row(
         self,

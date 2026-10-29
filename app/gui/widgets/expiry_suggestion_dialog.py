@@ -17,6 +17,7 @@ import customtkinter as ctk
 
 from app.core.dates import format_date
 from app.gui.animations import Animator
+from app.gui.icons import icons
 from app.gui.theme import FontRole, Radius, Spacing, Theme
 from app.gui.widgets.controls import Badge, ghost_button, primary_button, secondary_button
 from app.gui.widgets.dialogs import ModalDialog
@@ -147,7 +148,7 @@ class _BatchSection(ctk.CTkFrame):
             **kwargs: Дополнительные параметры ``CTkFrame``.
         """
         super().__init__(
-            master, fg_color=theme.color("surface_alt"), corner_radius=Radius.MD, **kwargs
+            master, fg_color=theme.color("surface_alt"), corner_radius=Radius.LG, **kwargs
         )
 
         header = ctk.CTkFrame(self, fg_color="transparent", width=0, height=0)
@@ -258,14 +259,26 @@ class ExpirySuggestionDialog(ModalDialog):
         ctk.CTkLabel(
             top,
             text="СТРОГИЙ ПОИСК НЕ НАШЁЛ СЕРТИФИКАТ НИ ДЛЯ ОДНОЙ ПАРТИИ",
-            font=theme.font(FontRole.CAPTION),
-            text_color=theme.color("text_muted"),
+            font=theme.font(FontRole.CAPTION, mono=True),
+            text_color=theme.color("warning"),
             anchor="w",
         ).pack(side="left")
 
+        ctk.CTkButton(
+            top,
+            text="",
+            image=icons.colored("close", theme, "text_muted", 14),
+            width=22,
+            height=22,
+            corner_radius=Radius.SM,
+            fg_color="transparent",
+            hover_color=theme.color("surface_hover"),
+            command=self.close,
+        ).pack(side="right")
+
         if remaining > 0:
             Badge(top, theme, text=f"осталось разобрать: {remaining}", role="warning").pack(
-                side="right"
+                side="right", padx=(0, Spacing.SM)
             )
 
         ctk.CTkLabel(

@@ -9,10 +9,10 @@ from typing import Any
 import customtkinter as ctk
 
 from app.core.constants import STATUS_LABELS
-from app.gui.theme import FontRole, Spacing
+from app.gui.theme import Spacing
 from app.gui.views.base_view import BaseView
 from app.gui.widgets.base import format_duration
-from app.gui.widgets.card import SectionCard
+from app.gui.widgets.card import RunHeaderCard, StatCard
 from app.gui.widgets.controls import ghost_button, secondary_button
 from app.gui.widgets.data_table import Column, DataTable, EmptyState
 from app.gui.widgets.dialogs import ask_confirmation
@@ -79,22 +79,44 @@ class HistoryView(BaseView):
 
         right = ctk.CTkFrame(split, fg_color="transparent", width=0, height=0)
         right.grid(row=0, column=1, sticky="nsew")
-        right.grid_rowconfigure(1, weight=1)
+        right.grid_rowconfigure(2, weight=1)
         right.grid_columnconfigure(0, weight=1)
 
-        self._summary_card = SectionCard(
+        self._run_header = RunHeaderCard(
             right,
             self.theme,
-            title="Детали обработки",
-            subtitle="Выберите запись в списке",
-            icon="chart",
+            icon="excel",
+            eyebrow="Просмотр обработки",
+            title="Выберите запись в списке",
             animator=self.app.animator,
         )
-        self._summary_card.grid(row=0, column=0, sticky="new", pady=(0, Spacing.MD))
-        self._summary_body = ctk.CTkFrame(
-            self._summary_card.content, fg_color="transparent", width=0, height=0
-        )
-        self._summary_body.pack(fill="x")
+        self._run_header.grid(row=0, column=0, sticky="new", pady=(0, Spacing.MD))
+
+        self._run_stats_row = ctk.CTkFrame(right, fg_color="transparent", width=0, height=0)
+        self._run_stats_row.grid(row=1, column=0, sticky="ew", pady=(0, Spacing.MD))
+        for index in range(4):
+            self._run_stats_row.grid_columnconfigure(index, weight=1, uniform="histstats")
+
+        self._run_stat_cards: dict[str, StatCard] = {}
+        definitions = [
+            ("total", "Всего позиций", "chart", "accent"),
+            ("matched", "Найдено", "check", "success"),
+            ("ambiguous", "Требует проверки", "alert", "warning"),
+            ("not_found", "Не найдено", "close", "danger"),
+        ]
+        for column, (key, title, icon, role) in enumerate(definitions):
+            card = StatCard(
+                self._run_stats_row,
+                self.theme,
+                title=title,
+                icon=icon,
+                accent_role=role,
+                animator=self.app.animator,
+            )
+            card.grid(
+                row=0, column=column, sticky="nsew", padx=(0 if column == 0 else Spacing.MD, 0)
+            )
+            self._run_stat_cards[key] = card
 
         self._items_table = DataTable(
             right,
@@ -108,7 +130,7 @@ class HistoryView(BaseView):
             ),
             height=12,
         )
-        self._items_table.grid(row=1, column=0, sticky="nsew")
+        self._items_table.grid(row=2, column=0, sticky="nsew")
 
         self._empty = EmptyState(
             self.content,
@@ -170,46 +192,28 @@ class HistoryView(BaseView):
         if run is None:
             return
         self._selected = run
-        self._summary_card.set_subtitle(f"{run.order_name} · {run.started_at:%d.%m.%Y %H:%M}")
 
-        for child in self._summary_body.winfo_children():
+        self._run_header.update(
+            title=run.order_name,
+            meta=(
+                f"{run.started_at:%d.%m.%Y в %H:%M} · "
+                f"заняло {format_duration(run.duration_seconds)} · "
+                f"скопировано файлов: {run.copied_files}"
+            ),
+        )
+        self._run_stat_cards["total"].update_value(str(run.total_rows))
+        self._run_stat_cards["matched"].update_value(
+            str(run.matched + run.manual),
+            f"из них вручную: {run.manual}" if run.manual else "",
+        )
+        self._run_stat_cards["ambiguous"].update_value(str(run.ambiguous))
+        self._run_stat_cards["not_found"].update_value(str(run.not_found))
+
+        for child in self._run_header.actions.winfo_children():
             child.destroy()
-
-        metrics = [
-            ("Всего позиций", str(run.total_rows), "text"),
-            ("Найдено автоматически", str(run.matched), "success"),
-            ("Выбрано вручную", str(run.manual), "info"),
-            ("Требует проверки", str(run.ambiguous), "warning"),
-            ("Не найдено", str(run.not_found), "danger"),
-            ("Скопировано файлов", str(run.copied_files), "text"),
-            ("Длительность", format_duration(run.duration_seconds), "text"),
-        ]
-        grid = ctk.CTkFrame(self._summary_body, fg_color="transparent", width=0, height=0)
-        grid.pack(fill="x")
-        for label, value, role in metrics:
-            row = ctk.CTkFrame(grid, fg_color="transparent", width=0, height=0)
-            row.pack(fill="x", pady=1)
-            ctk.CTkLabel(
-                row,
-                text=label,
-                font=self.theme.font(FontRole.CAPTION),
-                text_color=self.theme.color("text_muted"),
-                width=180,
-                anchor="w",
-            ).pack(side="left")
-            ctk.CTkLabel(
-                row,
-                text=value,
-                font=self.theme.font(FontRole.BODY_STRONG),
-                text_color=self.theme.color(role),
-                anchor="w",
-            ).pack(side="left")
-
-        buttons = ctk.CTkFrame(self._summary_body, fg_color="transparent", width=0, height=0)
-        buttons.pack(fill="x", pady=(Spacing.MD, 0))
         if run.output_file and Path(run.output_file).exists():
             ghost_button(
-                buttons,
+                self._run_header.actions,
                 self.theme,
                 text="Excel",
                 icon="excel",
@@ -218,7 +222,7 @@ class HistoryView(BaseView):
             ).pack(side="left")
         if run.certificates_dir and Path(run.certificates_dir).exists():
             ghost_button(
-                buttons,
+                self._run_header.actions,
                 self.theme,
                 text="Сертификаты",
                 icon="folder",
@@ -227,7 +231,7 @@ class HistoryView(BaseView):
             ).pack(side="left", padx=(Spacing.SM, 0))
         if run.report_file and Path(run.report_file).exists():
             ghost_button(
-                buttons,
+                self._run_header.actions,
                 self.theme,
                 text="Отчёт",
                 icon="chart",

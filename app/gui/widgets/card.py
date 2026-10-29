@@ -9,7 +9,7 @@ import customtkinter as ctk
 
 from app.gui.animations import Animator
 from app.gui.icons import icons
-from app.gui.theme import FontRole, Radius, Spacing, Theme
+from app.gui.theme import FontRole, Radius, Sizes, Spacing, Theme
 from app.gui.widgets.base import bind_recursive, set_cursor
 
 
@@ -120,7 +120,7 @@ class Card(ctk.CTkFrame):
 
 
 class SectionCard(Card):
-    """Карточка с заголовком, подзаголовком и областью действий."""
+    """Карточка с заголовком, подзаголовком, областью действий и опциональным сворачиванием."""
 
     def __init__(
         self,
@@ -130,7 +130,12 @@ class SectionCard(Card):
         title: str,
         subtitle: str = "",
         icon: str = "",
+        icon_role: str = "accent",
         animator: Animator | None = None,
+        collapsible: bool = False,
+        collapsed: bool = False,
+        compact_text: str = "",
+        on_toggle: Callable[[bool], None] | None = None,
         **kwargs: Any,
     ) -> None:
         """Создаёт карточку-раздел.
@@ -139,12 +144,25 @@ class SectionCard(Card):
             master: Родительский виджет.
             theme: Активная тема оформления.
             title: Заголовок раздела.
-            subtitle: Пояснение под заголовком.
-            icon: Имя иконки слева от заголовка.
+            subtitle: Пояснение под заголовком (видно в развёрнутом состоянии).
+            icon: Имя иконки слева от заголовка; при наличии рисуется в
+                цветной плитке — так же, как иконка :class:`StatCard`.
+            icon_role: Роль цвета плитки и иконки из палитры.
             animator: Менеджер анимаций.
+            collapsible: Показывать ли шеврон для сворачивания содержимого.
+            collapsed: Начальное состояние (имеет смысл только при
+                ``collapsible=True``).
+            compact_text: Текст подзаголовка в свёрнутом состоянии (вместо
+                ``subtitle``) — например, сводка выбранных файлов.
+            on_toggle: Обработчик смены состояния (получает новое значение
+                ``collapsed``).
             **kwargs: Дополнительные параметры :class:`Card`.
         """
         super().__init__(master, theme, animator=animator, **kwargs)
+        self._subtitle = subtitle
+        self._compact_text = compact_text
+        self._collapsed = collapsed and collapsible
+        self._on_toggle = on_toggle
 
         header = ctk.CTkFrame(self.body, fg_color="transparent", width=0, height=0)
         header.pack(fill="x")
@@ -153,12 +171,18 @@ class SectionCard(Card):
         title_row.pack(side="left", fill="x", expand=True)
 
         if icon:
-            ctk.CTkLabel(
+            tile = ctk.CTkFrame(
                 title_row,
-                text="",
-                image=icons.colored(icon, theme, "text_muted", 18),
-                width=22,
-            ).pack(side="left", padx=(0, Spacing.SM))
+                fg_color=theme.color(f"{icon_role}_soft"),
+                corner_radius=Radius.MD,
+                width=Sizes.TILE_SM,
+                height=Sizes.TILE_SM,
+            )
+            tile.pack(side="left", padx=(0, Spacing.SM))
+            tile.pack_propagate(False)
+            ctk.CTkLabel(tile, text="", image=icons.colored(icon, theme, icon_role, 16)).pack(
+                expand=True
+            )
 
         labels = ctk.CTkFrame(title_row, fg_color="transparent", width=0, height=0)
         labels.pack(side="left", fill="x", expand=True)
@@ -173,10 +197,10 @@ class SectionCard(Card):
         self.title_label.pack(fill="x", anchor="w")
 
         self.subtitle_label: ctk.CTkLabel | None = None
-        if subtitle:
+        if subtitle or compact_text:
             self.subtitle_label = ctk.CTkLabel(
                 labels,
-                text=subtitle,
+                text=self._compact_text if self._collapsed else subtitle,
                 font=theme.font(FontRole.SMALL),
                 text_color=theme.color("text_muted"),
                 anchor="w",
@@ -187,17 +211,76 @@ class SectionCard(Card):
         self.actions = ctk.CTkFrame(header, fg_color="transparent", width=0, height=0)
         self.actions.pack(side="right")
 
+        self._toggle_button: ctk.CTkButton | None = None
+        if collapsible:
+            self._toggle_button = ctk.CTkButton(
+                self.actions,
+                text="",
+                image=icons.colored(
+                    "chevron_right" if self._collapsed else "chevron_down", theme, "text_muted", 16
+                ),
+                width=30,
+                height=30,
+                corner_radius=Radius.SM,
+                fg_color="transparent",
+                hover_color=theme.color("surface_hover"),
+                command=self.toggle_collapsed,
+            )
+            self._toggle_button.pack(side="right")
+
         self.content = ctk.CTkFrame(self.body, fg_color="transparent", width=0, height=0)
-        self.content.pack(fill="both", expand=True, pady=(Spacing.MD, 0))
+        if not self._collapsed:
+            self.content.pack(fill="both", expand=True, pady=(Spacing.MD, 0))
 
     def set_subtitle(self, text: str) -> None:
-        """Обновляет текст подзаголовка.
+        """Обновляет текст подзаголовка (в развёрнутом состоянии).
 
         Args:
             text: Новый текст.
         """
-        if self.subtitle_label is not None:
+        self._subtitle = text
+        if self.subtitle_label is not None and not self._collapsed:
             self.subtitle_label.configure(text=text)
+
+    def set_compact_text(self, text: str) -> None:
+        """Обновляет текст подзаголовка, показываемый в свёрнутом состоянии.
+
+        Args:
+            text: Новый текст (например, сводка выбранных файлов).
+        """
+        self._compact_text = text
+        if self.subtitle_label is not None and self._collapsed:
+            self.subtitle_label.configure(text=text)
+
+    def toggle_collapsed(self) -> None:
+        """Переключает развёрнутое/свёрнутое состояние."""
+        self.set_collapsed(not self._collapsed)
+
+    def set_collapsed(self, value: bool) -> None:
+        """Устанавливает развёрнутое/свёрнутое состояние.
+
+        Args:
+            value: ``True`` — свернуть содержимое.
+        """
+        if value == self._collapsed:
+            return
+        self._collapsed = value
+        if value:
+            self.content.pack_forget()
+        else:
+            self.content.pack(fill="both", expand=True, pady=(Spacing.MD, 0))
+        try:
+            if self.subtitle_label is not None:
+                self.subtitle_label.configure(text=self._compact_text if value else self._subtitle)
+            if self._toggle_button is not None:
+                name = "chevron_right" if value else "chevron_down"
+                self._toggle_button.configure(
+                    image=icons.colored(name, self._theme, "text_muted", 16)
+                )
+        except Exception:
+            pass
+        if self._on_toggle is not None:
+            self._on_toggle(value)
 
 
 class StatCard(Card):
@@ -252,8 +335,8 @@ class StatCard(Card):
             top,
             fg_color=theme.color(f"{accent_role}_soft"),
             corner_radius=Radius.MD,
-            width=30,
-            height=30,
+            width=Sizes.TILE_SM,
+            height=Sizes.TILE_SM,
         )
         self._icon_tile.pack(side="right")
         self._icon_tile.pack_propagate(False)
@@ -265,7 +348,7 @@ class StatCard(Card):
         self.value_label = ctk.CTkLabel(
             self.body,
             text=value,
-            font=theme.font(FontRole.METRIC),
+            font=theme.font(FontRole.METRIC, mono=True),
             text_color=theme.color(accent_role),
             anchor="w",
         )
@@ -305,5 +388,150 @@ class StatCard(Card):
             self.value_label.configure(text_color=self._theme.color(role))
             self._icon_tile.configure(fg_color=self._theme.color(f"{role}_soft"))
             self._icon_label.configure(image=icons.colored(self._icon_name, self._theme, role, 16))
+        except Exception:
+            pass
+
+
+class RunHeaderCard(Card):
+    """Карточка-«герой» конкретной обработки: файл, время, место под действия.
+
+    Один и тот же компонент используется и для текущего запуска на экране
+    подбора, и для просматриваемого запуска в истории — единый визуальный
+    язык для «это про один конкретный файл», а не разные самодельные блоки.
+    """
+
+    def __init__(
+        self,
+        master: Any,
+        theme: Theme,
+        *,
+        icon: str = "excel",
+        icon_role: str = "accent",
+        eyebrow: str = "",
+        title: str = "",
+        meta: str = "",
+        animator: Animator | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Создаёт карточку.
+
+        Args:
+            master: Родительский виджет.
+            theme: Активная тема оформления.
+            icon: Имя иконки в плитке слева.
+            icon_role: Роль цвета плитки и иконки.
+            eyebrow: Короткая надпись над заголовком (капслоком, моно).
+            title: Заголовок — как правило, имя файла.
+            meta: Строка с подробностями под заголовком.
+            animator: Менеджер анимаций.
+            **kwargs: Дополнительные параметры :class:`Card`.
+        """
+        super().__init__(master, theme, animator=animator, **kwargs)
+        self._icon_name = icon
+        self._icon_role = icon_role
+
+        header = ctk.CTkFrame(self.body, fg_color="transparent", width=0, height=0)
+        header.pack(fill="x")
+
+        left = ctk.CTkFrame(header, fg_color="transparent", width=0, height=0)
+        left.pack(side="left", fill="x", expand=True)
+
+        self._icon_tile = ctk.CTkFrame(
+            left,
+            fg_color=theme.color(f"{icon_role}_soft"),
+            corner_radius=Radius.MD,
+            width=Sizes.TILE_LG,
+            height=Sizes.TILE_LG,
+        )
+        self._icon_tile.pack(side="left", padx=(0, Spacing.MD))
+        self._icon_tile.pack_propagate(False)
+        self._icon_label = ctk.CTkLabel(
+            self._icon_tile, text="", image=icons.colored(icon, theme, icon_role, 20)
+        )
+        self._icon_label.pack(expand=True)
+
+        labels = ctk.CTkFrame(left, fg_color="transparent", width=0, height=0)
+        labels.pack(side="left", fill="x", expand=True)
+
+        self.eyebrow_label = ctk.CTkLabel(
+            labels,
+            text=eyebrow.upper(),
+            font=theme.font(FontRole.CAPTION, mono=True),
+            text_color=theme.color("text_muted"),
+            anchor="w",
+        )
+        self.eyebrow_label.pack(fill="x", anchor="w")
+
+        self.title_label = ctk.CTkLabel(
+            labels,
+            text=title,
+            font=theme.font(FontRole.TITLE),
+            text_color=theme.color("text"),
+            anchor="w",
+            justify="left",
+            wraplength=560,
+        )
+        self.title_label.pack(fill="x", anchor="w", pady=(3, 0))
+
+        self.meta_label = ctk.CTkLabel(
+            labels,
+            text=meta,
+            font=theme.font(FontRole.SMALL),
+            text_color=theme.color("text_muted"),
+            anchor="w",
+        )
+        self.meta_label.pack(fill="x", anchor="w", pady=(4, 0))
+
+        self.actions = ctk.CTkFrame(header, fg_color="transparent", width=0, height=0)
+        self.actions.pack(side="right")
+
+    def update(
+        self,
+        *,
+        icon: str | None = None,
+        icon_role: str | None = None,
+        eyebrow: str | None = None,
+        title: str | None = None,
+        meta: str | None = None,
+    ) -> None:
+        """Обновляет содержимое карточки без пересборки виджетов.
+
+        Args:
+            icon: Новое имя иконки; ``None`` — оставить прежнюю.
+            icon_role: Новая роль цвета; ``None`` — оставить прежнюю.
+            eyebrow: Новая надпись над заголовком; ``None`` — не менять.
+            title: Новый заголовок; ``None`` — не менять.
+            meta: Новая строка подробностей; ``None`` — не менять.
+        """
+        try:
+            if icon is not None:
+                self._icon_name = icon
+            if icon_role is not None:
+                self._icon_role = icon_role
+            if icon is not None or icon_role is not None:
+                self._icon_tile.configure(fg_color=self._theme.color(f"{self._icon_role}_soft"))
+                self._icon_label.configure(
+                    image=icons.colored(self._icon_name, self._theme, self._icon_role, 20)
+                )
+            if eyebrow is not None:
+                self.eyebrow_label.configure(text=eyebrow.upper())
+            if title is not None:
+                self.title_label.configure(text=title)
+            if meta is not None:
+                self.meta_label.configure(text=meta)
+        except Exception:
+            pass
+
+    def refresh_theme(self) -> None:
+        """Перечитывает цвета после смены темы."""
+        super().refresh_theme()
+        try:
+            self.eyebrow_label.configure(text_color=self._theme.color("text_muted"))
+            self.title_label.configure(text_color=self._theme.color("text"))
+            self.meta_label.configure(text_color=self._theme.color("text_muted"))
+            self._icon_tile.configure(fg_color=self._theme.color(f"{self._icon_role}_soft"))
+            self._icon_label.configure(
+                image=icons.colored(self._icon_name, self._theme, self._icon_role, 20)
+            )
         except Exception:
             pass

@@ -23,9 +23,9 @@ from app.gui.theme import FontRole, Sizes, Spacing
 from app.gui.views.base_view import BaseView
 from app.gui.widgets.ambiguity_dialog import SKIP, AmbiguityDialog
 from app.gui.widgets.base import format_duration
-from app.gui.widgets.card import SectionCard, StatCard
+from app.gui.widgets.card import RunHeaderCard, SectionCard, StatCard
 from app.gui.widgets.controls import SegmentedFilter, ghost_button, primary_button, secondary_button
-from app.gui.widgets.data_table import Column, DataTable
+from app.gui.widgets.data_table import Column, DataTable, EmptyState
 from app.gui.widgets.drop_zone import FileDropZone
 from app.gui.widgets.expiry_suggestion_dialog import ExpirySuggestionDialog
 from app.gui.widgets.progress_panel import ProgressPanel
@@ -63,6 +63,8 @@ class DashboardView(BaseView):
         self._results: list[MatchResult] = []
         self._filter = "all"
         self._stat_cards: dict[str, StatCard] = {}
+        self._run_stat_cards: dict[str, StatCard] = {}
+        self._has_run = False
 
     # ---------------------------------------------------------------- разметка
     def build(self) -> None:
@@ -70,6 +72,8 @@ class DashboardView(BaseView):
         self._build_actions()
         self._build_stats()
         self._build_workspace()
+        self._build_run_header()
+        self._build_run_stats()
         self._build_results()
         self.refresh()
 
@@ -84,7 +88,15 @@ class DashboardView(BaseView):
         ).pack(side="right")
 
     def _build_stats(self) -> None:
-        """Создаёт полосу ключевых показателей."""
+        """Создаёт полосу ключевых показателей по базе сертификатов."""
+        ctk.CTkLabel(
+            self.content,
+            text="Обзор базы".upper(),
+            font=self.theme.font(FontRole.CAPTION, mono=True),
+            text_color=self.theme.color("text_muted"),
+            anchor="w",
+        ).pack(fill="x", anchor="w", pady=(0, Spacing.SM))
+
         row = ctk.CTkFrame(self.content, fg_color="transparent", width=0, height=0)
         row.pack(fill="x", pady=(0, Spacing.LG))
         for index in range(4):
@@ -119,8 +131,10 @@ class DashboardView(BaseView):
             subtitle="Перетащите файлы или нажмите, чтобы выбрать",
             icon="play",
             animator=self.app.animator,
+            collapsible=True,
         )
         card.pack(fill="x")
+        self._intake_card = card
 
         zones = ctk.CTkFrame(card.content, fg_color="transparent", width=0, height=0)
         zones.pack(fill="x")
@@ -182,6 +196,59 @@ class DashboardView(BaseView):
 
         self._update_run_state()
 
+    def _build_run_header(self) -> None:
+        """Создаёт заголовок текущего запуска.
+
+        Виден только после первой успешной обработки за сеанс — см.
+        :meth:`_show_results`, которая и паковывает виджет непосредственно
+        перед карточкой результатов.
+        """
+        self._run_header = RunHeaderCard(self.content, self.theme, animator=self.app.animator)
+        secondary_button(
+            self._run_header.actions,
+            self.theme,
+            text="Подобрать заново",
+            icon="refresh",
+            command=self.run_processing,
+        ).pack(side="left")
+        primary_button(
+            self._run_header.actions,
+            self.theme,
+            text="Открыть папку с результатом",
+            icon="folder",
+            command=self._open_output_folder,
+        ).pack(side="left", padx=(Spacing.SM, 0))
+
+    def _build_run_stats(self) -> None:
+        """Создаёт полосу показателей текущего запуска (не накопительных).
+
+        Как и :attr:`_run_header`, паковывается только после первой
+        обработки за сеанс.
+        """
+        self._run_stats_row = ctk.CTkFrame(self.content, fg_color="transparent", width=0, height=0)
+        for index in range(4):
+            self._run_stats_row.grid_columnconfigure(index, weight=1, uniform="runstats")
+
+        definitions = [
+            ("total", "Всего позиций", "chart", "accent"),
+            ("matched", "Найдено", "check", "success"),
+            ("ambiguous", "Требует проверки", "alert", "warning"),
+            ("not_found", "Не найдено", "close", "danger"),
+        ]
+        for column, (key, title, icon, role) in enumerate(definitions):
+            card = StatCard(
+                self._run_stats_row,
+                self.theme,
+                title=title,
+                icon=icon,
+                accent_role=role,
+                animator=self.app.animator,
+            )
+            card.grid(
+                row=0, column=column, sticky="nsew", padx=(0 if column == 0 else Spacing.MD, 0)
+            )
+            self._run_stat_cards[key] = card
+
     def _build_results(self) -> None:
         """Создаёт таблицу результатов последней обработки."""
         self._results_card = SectionCard(
@@ -205,7 +272,17 @@ class DashboardView(BaseView):
             ],
             on_change=self._apply_filter,
         )
-        self._filter_control.pack(side="right")
+        # Запаковывается только после первой обработки — до тех пор счётчики
+        # фильтра (0/0/0/0) ничего не значат и только шумят в шапке карточки.
+
+        self._empty_state = EmptyState(
+            self._results_card.content,
+            self.theme,
+            icon="certificate",
+            title="Здесь появятся результаты",
+            message="Выберите файл заказа и нажмите «Подобрать сертификаты», чтобы начать.",
+        )
+        self._empty_state.pack(fill="both", expand=True, pady=Spacing.XL)
 
         self._table = DataTable(
             self._results_card.content,
@@ -219,7 +296,7 @@ class DashboardView(BaseView):
                 Column("score", "Совпадение", width=100, anchor="center", numeric=True),
                 Column("matched_product", "Товар в базе", width=220, stretch=True),
             ),
-            on_activate=self._open_result_pdf,
+            on_activate=self._activate_result,
             context_actions=(
                 ("Открыть PDF сертификата", self._open_result_pdf),
                 ("Изменить сертификат…", self._change_certificate),
@@ -228,7 +305,7 @@ class DashboardView(BaseView):
             ),
             height=10,
         )
-        self._table.pack(fill="both", expand=True)
+        # Запаковывается только после первой обработки, см. _show_results.
 
         self._output_row = ctk.CTkFrame(
             self._results_card.content, fg_color="transparent", width=0, height=0
@@ -546,8 +623,39 @@ class DashboardView(BaseView):
     # -------------------------------------------------------------- результаты
     def _show_results(self, outcome: ProcessingOutcome) -> None:
         """Отображает результаты обработки."""
+        if not self._has_run:
+            self._has_run = True
+            self._empty_state.pack_forget()
+            self._filter_control.pack(side="right")
+            self._table.pack(fill="both", expand=True)
+            self._run_header.pack(fill="x", pady=(Spacing.LG, 0), before=self._results_card)
+            self._run_stats_row.pack(fill="x", pady=(Spacing.LG, 0), before=self._results_card)
+
         self._results = outcome.results
         self._apply_filter(self._filter)
+
+        self._run_header.update(
+            icon="excel",
+            eyebrow="Текущий заказ",
+            title=outcome.run.order_name,
+            meta=(
+                f"Обработан {outcome.run.started_at:%d.%m.%Y в %H:%M} · "
+                f"заняло {format_duration(outcome.run.duration_seconds)} · "
+                f"{outcome.run.total_rows} позиций"
+            ),
+        )
+        self._run_stat_cards["total"].update_value(str(outcome.run.total_rows))
+        self._run_stat_cards["matched"].update_value(str(outcome.matched + outcome.manual))
+        self._run_stat_cards["ambiguous"].update_value(str(outcome.ambiguous))
+        self._run_stat_cards["not_found"].update_value(str(outcome.not_found))
+
+        order_path = self._order_path
+        database_path = self._database_path
+        summary = f"Заказ: {order_path.name}" if order_path is not None else ""
+        if database_path is not None:
+            summary += f" · База: {database_path.name}"
+        self._intake_card.set_compact_text(summary)
+        self._intake_card.set_collapsed(True)
 
         self._results_card.set_subtitle(
             f"{outcome.run.order_name} · {len(outcome.results)} позиций · "
@@ -649,6 +757,21 @@ class DashboardView(BaseView):
 
         self._table.set_rows(rows)
         self._filter_control.set_counts(counts)
+
+    def _activate_result(self, row_id: str) -> None:
+        """Обрабатывает активацию строки результата (двойной клик, Enter).
+
+        Для строки, требующей проверки, сразу открывает окно выбора
+        сертификата — там действительно есть что сделать; для найденного
+        результата, как и раньше, открывает PDF. Пункт «Изменить
+        сертификат…» в контекстном меню остаётся явным, всегда доступным
+        путём к тому же окну независимо от статуса строки.
+        """
+        result = self._result_at(row_id)
+        if result is not None and result.status is MatchStatus.AMBIGUOUS:
+            self._change_certificate(row_id)
+            return
+        self._open_result_pdf(row_id)
 
     def _open_result_pdf(self, row_id: str) -> None:
         """Открывает PDF сертификата выбранной строки."""
