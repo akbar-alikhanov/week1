@@ -61,7 +61,7 @@ class SettingsView(BaseView):
             command=self._reset,
         ).pack(side="right")
 
-        self._scroll = ctk.CTkScrollableFrame(self.content, fg_color="transparent")
+        self._scroll = ctk.CTkScrollableFrame(self.content, fg_color=self.theme.color("background"))
         self._scroll.pack(fill="both", expand=True)
 
         self._build_matching_section()
@@ -1042,3 +1042,22 @@ class SettingsView(BaseView):
         """Сохраняет настройки при уходе из раздела."""
         if self._save_after is not None:
             self._save()
+
+    def refresh_theme(self) -> None:
+        """Обновляет цвета после смены темы.
+
+        Прокручиваемая область строится с явным ``fg_color`` вместо
+        ``"transparent"`` — у ``CTkScrollableFrame`` это не «настоящая»
+        прозрачность, а разовое наследование цвета ближайшего непрозрачного
+        предка на момент создания виджета; раз зафиксировав его, сам холст
+        прокрутки за сменой темы потом не следит. Остальные виджеты раздела
+        (карточки, ползунки, переключатели) не перекрашиваются даже сейчас —
+        это общая черта всех разделов с карточками в этой версии программы,
+        а не особенность настроек, и правится отдельной, более крупной
+        задачей, а не здесь.
+        """
+        super().refresh_theme()
+        try:
+            self._scroll.configure(fg_color=self.theme.color("background"))
+        except Exception:
+            pass

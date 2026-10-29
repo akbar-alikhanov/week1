@@ -49,6 +49,7 @@ class LogsView(BaseView):
         self._follow = True
         self._warning_total = 0
         self._error_total = 0
+        self._badge_refresh_after: str | None = None
 
     def build(self) -> None:
         """Создаёт содержимое раздела."""
@@ -198,17 +199,26 @@ class LogsView(BaseView):
                 "error": sum(1 for r in matching if r.level_number >= logging.ERROR),
             }
         )
+        self._refresh_badge_totals(all_records)
 
-        # Полный пересчёт синхронизирует счётчики с кольцевым буфером журнала
-        # (старые записи из него вытесняются) — инкремент в ``_on_record``
-        # этого не видит и только прибавляет, поэтому периодическая
-        # ресинхронизация здесь не даёт ему уйти в постоянный перебор.
+    def _refresh_badge_totals(self, all_records: list[LogRecordView]) -> None:
+        """Пересчитывает и показывает бейджи предупреждений/ошибок по снимку буфера.
+
+        Всегда полный пересчёт, не инкремент: буфер журнала кольцевой
+        (``MemoryLogHandler``, вместимость 5000 записей) и вытесняет старые
+        записи — инкремент в :meth:`_on_record` этого не видит и считал бы
+        вытесненные предупреждения/ошибки вечно, расходясь с тем, что
+        реально осталось в буфере.
+        """
         self._warning_total = sum(
             1 for r in all_records if logging.WARNING <= r.level_number < logging.ERROR
         )
         self._error_total = sum(1 for r in all_records if r.level_number >= logging.ERROR)
-        self._warning_badge.update_state(f"предупреждений: {self._warning_total}", "warning")
-        self._error_badge.update_state(f"ошибок: {self._error_total}", "danger")
+        try:
+            self._warning_badge.update_state(f"предупреждений: {self._warning_total}", "warning")
+            self._error_badge.update_state(f"ошибок: {self._error_total}", "danger")
+        except Exception:
+            pass
 
     def _append_record(self, record: LogRecordView) -> None:
         """Добавляет запись в текстовое поле."""
@@ -247,20 +257,14 @@ class LogsView(BaseView):
     def _on_record(self, record: LogRecordView) -> None:
         """Добавляет новую запись, если она проходит фильтры, и обновляет бейджи.
 
-        Бейджи предупреждений/ошибок обновляются здесь дешёвым инкрементом
-        (не полным пересчётом ``_update_counters`` — при обработке большого
-        заказа это вызывалось бы на каждую строку лога) независимо от
-        «Следить», чтобы оставаться живым индикатором, даже когда
-        автопрокрутка самого текста выключена.
+        Обновление бейджей откладывается (см. :meth:`_schedule_badge_refresh`)
+        независимо от «Следить», чтобы оставаться живым индикатором, даже
+        когда автопрокрутка самого текста выключена.
         """
         if not self.winfo_exists():
             return
-        if record.level_number >= logging.ERROR:
-            self._error_total += 1
-            self._error_badge.update_state(f"ошибок: {self._error_total}", "danger")
-        elif record.level_number >= logging.WARNING:
-            self._warning_total += 1
-            self._warning_badge.update_state(f"предупреждений: {self._warning_total}", "warning")
+        if record.level_number >= logging.WARNING:
+            self._schedule_badge_refresh()
 
         if not self._follow:
             return
@@ -275,6 +279,31 @@ class LogsView(BaseView):
             self._textbox.see("end")
         except Exception:
             pass
+
+    def _schedule_badge_refresh(self) -> None:
+        """Откладывает пересчёт бейджей предупреждений/ошибок.
+
+        Короткая пауза собирает всплеск предупреждений/ошибок (например,
+        сразу несколько ненайденных PDF подряд при обработке заказа) в один
+        пересчёт вместо частых ``configure()`` подряд на каждую запись.
+        """
+        if self._badge_refresh_after is not None:
+            try:
+                self.after_cancel(self._badge_refresh_after)
+            except Exception:
+                pass
+        try:
+            self._badge_refresh_after = self.after(150, self._apply_badge_refresh)
+        except Exception:
+            pass
+
+    def _apply_badge_refresh(self) -> None:
+        """Пересчитывает бейджи предупреждений/ошибок по свежему снимку буфера."""
+        self._badge_refresh_after = None
+        handler = self.app.container.log_handler
+        if handler is None:
+            return
+        self._refresh_badge_totals(handler.snapshot(min_level=logging.NOTSET))
 
     def _on_level(self, value: str) -> None:
         """Меняет минимальный уровень отображаемых записей."""
@@ -312,13 +341,19 @@ class LogsView(BaseView):
         """Ничего не делает: подписка сохраняется для накопления записей."""
 
     def destroy(self) -> None:
-        """Отписывается от журнала при уничтожении раздела."""
+        """Отписывается от журнала и отменяет отложенный пересчёт бейджей."""
         if self._unsubscribe is not None:
             try:
                 self._unsubscribe()
             except Exception:
                 pass
             self._unsubscribe = None
+        if self._badge_refresh_after is not None:
+            try:
+                self.after_cancel(self._badge_refresh_after)
+            except Exception:
+                pass
+            self._badge_refresh_after = None
         super().destroy()
 
     def refresh_theme(self) -> None:

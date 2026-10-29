@@ -363,16 +363,20 @@ class StatCard(Card):
         )
         self.hint_label.pack(fill="x", anchor="w")
 
-    def update_value(self, value: str, hint: str = "") -> None:
+    def update_value(self, value: str, hint: str | None = None) -> None:
         """Обновляет значение показателя.
 
         Args:
             value: Новое значение.
-            hint: Новое пояснение (пустая строка оставляет прежнее).
+            hint: Новое пояснение; ``None`` оставляет прежнее, пустая строка
+                очищает его. Раньше оба случая не различались (любое ложное
+                значение оставляло прежний текст), из-за чего пояснение от
+                ранее выбранного запуска могло остаться висеть на карточке
+                после выбора запуска без него.
         """
         try:
             self.value_label.configure(text=value)
-            if hint:
+            if hint is not None:
                 self.hint_label.configure(text=hint)
         except Exception:
             pass
@@ -535,3 +539,43 @@ class RunHeaderCard(Card):
             )
         except Exception:
             pass
+
+
+class RunStatsRow(ctk.CTkFrame):
+    """Ряд из 4 карточек показателей запуска: всего/найдено/требует проверки/не найдено.
+
+    Переиспользуется на Подборе (текущий запуск) и в Истории (просматриваемый
+    запуск) — одна раскладка и одни роли цвета вместо двух копий одного и
+    того же кода построения карточек.
+    """
+
+    def __init__(
+        self, master: Any, theme: Theme, *, animator: Animator | None = None, **kwargs: Any
+    ) -> None:
+        """Создаёт ряд карточек показателей запуска.
+
+        Args:
+            master: Родительский виджет.
+            theme: Активная тема оформления.
+            animator: Менеджер анимаций.
+            **kwargs: Дополнительные параметры ``CTkFrame``.
+        """
+        super().__init__(master, fg_color="transparent", width=0, height=0, **kwargs)
+        for index in range(4):
+            self.grid_columnconfigure(index, weight=1, uniform="runstats")
+
+        definitions = (
+            ("total", "Всего позиций", "chart", "accent"),
+            ("matched", "Найдено", "check", "success"),
+            ("ambiguous", "Требует проверки", "alert", "warning"),
+            ("not_found", "Не найдено", "close", "danger"),
+        )
+        self.cards: dict[str, StatCard] = {}
+        for column, (key, title, icon, role) in enumerate(definitions):
+            card = StatCard(
+                self, theme, title=title, icon=icon, accent_role=role, animator=animator
+            )
+            card.grid(
+                row=0, column=column, sticky="nsew", padx=(0 if column == 0 else Spacing.MD, 0)
+            )
+            self.cards[key] = card

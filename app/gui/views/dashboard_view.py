@@ -23,7 +23,7 @@ from app.gui.theme import FontRole, Sizes, Spacing
 from app.gui.views.base_view import BaseView
 from app.gui.widgets.ambiguity_dialog import SKIP, AmbiguityDialog
 from app.gui.widgets.base import format_duration
-from app.gui.widgets.card import RunHeaderCard, SectionCard, StatCard
+from app.gui.widgets.card import RunHeaderCard, RunStatsRow, SectionCard, StatCard
 from app.gui.widgets.controls import SegmentedFilter, ghost_button, primary_button, secondary_button
 from app.gui.widgets.data_table import Column, DataTable, EmptyState
 from app.gui.widgets.drop_zone import FileDropZone
@@ -63,7 +63,6 @@ class DashboardView(BaseView):
         self._results: list[MatchResult] = []
         self._filter = "all"
         self._stat_cards: dict[str, StatCard] = {}
-        self._run_stat_cards: dict[str, StatCard] = {}
         self._has_run = False
 
     # ---------------------------------------------------------------- разметка
@@ -225,29 +224,7 @@ class DashboardView(BaseView):
         Как и :attr:`_run_header`, паковывается только после первой
         обработки за сеанс.
         """
-        self._run_stats_row = ctk.CTkFrame(self.content, fg_color="transparent", width=0, height=0)
-        for index in range(4):
-            self._run_stats_row.grid_columnconfigure(index, weight=1, uniform="runstats")
-
-        definitions = [
-            ("total", "Всего позиций", "chart", "accent"),
-            ("matched", "Найдено", "check", "success"),
-            ("ambiguous", "Требует проверки", "alert", "warning"),
-            ("not_found", "Не найдено", "close", "danger"),
-        ]
-        for column, (key, title, icon, role) in enumerate(definitions):
-            card = StatCard(
-                self._run_stats_row,
-                self.theme,
-                title=title,
-                icon=icon,
-                accent_role=role,
-                animator=self.app.animator,
-            )
-            card.grid(
-                row=0, column=column, sticky="nsew", padx=(0 if column == 0 else Spacing.MD, 0)
-            )
-            self._run_stat_cards[key] = card
+        self._run_stats_row = RunStatsRow(self.content, self.theme, animator=self.app.animator)
 
     def _build_results(self) -> None:
         """Создаёт таблицу результатов последней обработки."""
@@ -644,10 +621,10 @@ class DashboardView(BaseView):
                 f"{outcome.run.total_rows} позиций"
             ),
         )
-        self._run_stat_cards["total"].update_value(str(outcome.run.total_rows))
-        self._run_stat_cards["matched"].update_value(str(outcome.matched + outcome.manual))
-        self._run_stat_cards["ambiguous"].update_value(str(outcome.ambiguous))
-        self._run_stat_cards["not_found"].update_value(str(outcome.not_found))
+        self._run_stats_row.cards["total"].update_value(str(outcome.run.total_rows))
+        self._run_stats_row.cards["matched"].update_value(str(outcome.matched + outcome.manual))
+        self._run_stats_row.cards["ambiguous"].update_value(str(outcome.ambiguous))
+        self._run_stats_row.cards["not_found"].update_value(str(outcome.not_found))
 
         order_path = self._order_path
         database_path = self._database_path

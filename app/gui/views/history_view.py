@@ -12,7 +12,7 @@ from app.core.constants import STATUS_LABELS
 from app.gui.theme import Spacing
 from app.gui.views.base_view import BaseView
 from app.gui.widgets.base import format_duration
-from app.gui.widgets.card import RunHeaderCard, StatCard
+from app.gui.widgets.card import RunHeaderCard, RunStatsRow
 from app.gui.widgets.controls import ghost_button, secondary_button
 from app.gui.widgets.data_table import Column, DataTable, EmptyState
 from app.gui.widgets.dialogs import ask_confirmation
@@ -92,31 +92,8 @@ class HistoryView(BaseView):
         )
         self._run_header.grid(row=0, column=0, sticky="new", pady=(0, Spacing.MD))
 
-        self._run_stats_row = ctk.CTkFrame(right, fg_color="transparent", width=0, height=0)
+        self._run_stats_row = RunStatsRow(right, self.theme, animator=self.app.animator)
         self._run_stats_row.grid(row=1, column=0, sticky="ew", pady=(0, Spacing.MD))
-        for index in range(4):
-            self._run_stats_row.grid_columnconfigure(index, weight=1, uniform="histstats")
-
-        self._run_stat_cards: dict[str, StatCard] = {}
-        definitions = [
-            ("total", "Всего позиций", "chart", "accent"),
-            ("matched", "Найдено", "check", "success"),
-            ("ambiguous", "Требует проверки", "alert", "warning"),
-            ("not_found", "Не найдено", "close", "danger"),
-        ]
-        for column, (key, title, icon, role) in enumerate(definitions):
-            card = StatCard(
-                self._run_stats_row,
-                self.theme,
-                title=title,
-                icon=icon,
-                accent_role=role,
-                animator=self.app.animator,
-            )
-            card.grid(
-                row=0, column=column, sticky="nsew", padx=(0 if column == 0 else Spacing.MD, 0)
-            )
-            self._run_stat_cards[key] = card
 
         self._items_table = DataTable(
             right,
@@ -201,13 +178,13 @@ class HistoryView(BaseView):
                 f"скопировано файлов: {run.copied_files}"
             ),
         )
-        self._run_stat_cards["total"].update_value(str(run.total_rows))
-        self._run_stat_cards["matched"].update_value(
+        self._run_stats_row.cards["total"].update_value(str(run.total_rows))
+        self._run_stats_row.cards["matched"].update_value(
             str(run.matched + run.manual),
             f"из них вручную: {run.manual}" if run.manual else "",
         )
-        self._run_stat_cards["ambiguous"].update_value(str(run.ambiguous))
-        self._run_stat_cards["not_found"].update_value(str(run.not_found))
+        self._run_stats_row.cards["ambiguous"].update_value(str(run.ambiguous))
+        self._run_stats_row.cards["not_found"].update_value(str(run.not_found))
 
         for child in self._run_header.actions.winfo_children():
             child.destroy()

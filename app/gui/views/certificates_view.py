@@ -259,7 +259,24 @@ class CertificatesView(BaseView):
         self.search.focus_input()
 
     def refresh(self) -> None:
-        """Перечитывает базу сертификатов с учётом поиска и фильтра."""
+        """Перечитывает базу сертификатов и показатели по всей базе.
+
+        Показатели — всегда по всей базе (см. :meth:`_build_stats`), не
+        зависят от поиска и фильтра, поэтому их не нужно пересчитывать при
+        каждом нажатии в поиске — для этого есть лёгкий
+        :meth:`_refresh_table`. Этот метод вызывается там, где состав самой
+        базы действительно мог измениться: при построении раздела и при
+        возврате на пустой экран (см. :meth:`on_show`).
+        """
+        self._refresh_table()
+        self._update_stats()
+
+    def _refresh_table(self) -> None:
+        """Перечитывает список и таблицу с учётом поиска и фильтра.
+
+        Не трогает показатели по базе — они от поиска и фильтра не зависят
+        (см. :meth:`refresh`).
+        """
         repository = self.app.container.certificate_repository
         try:
             found = repository.search(self._query, limit=_PAGE_SIZE)
@@ -269,7 +286,6 @@ class CertificatesView(BaseView):
 
         self._certificates = [item for item in found if self._matches_filter(item)]
         self._render()
-        self._update_stats()
 
     def _matches_filter(self, certificate: CertificateProduct) -> bool:
         """Проверяет соответствие позиции активному фильтру."""
@@ -326,12 +342,12 @@ class CertificatesView(BaseView):
     def _on_search(self, query: str) -> None:
         """Обрабатывает изменение поискового запроса."""
         self._query = query
-        self.refresh()
+        self._refresh_table()
 
     def _on_filter(self, value: str) -> None:
         """Обрабатывает смену фильтра."""
         self._filter = value
-        self.refresh()
+        self._refresh_table()
 
     def _on_select(self, row_id: str) -> None:
         """Показывает сведения и, если найден, документ выбранной позиции."""
